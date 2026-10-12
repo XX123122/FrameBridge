@@ -205,6 +205,17 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Reviewed third-party sources are data only; never execute or redistribute them.
+.review-cache/
+.framebridge.lock
+tasks.json
+logs/*
+!logs/.gitkeep
+outputs/*
+!outputs/.gitkeep
+references/*
+!references/.gitkeep
+
 # Ruff stuff:
 .ruff_cache/
 

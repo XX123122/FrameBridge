@@ -1,0 +1,331 @@
+"""Opt-in local DOM/download integration tests. Every HTTPS request is intercepted.
+
+Set FRAMEBRIDGE_FIXTURE_BROWSER=msedge (or chrome) to use an installed browser in
+an isolated headless test context; no user profile and no real ChatGPT request.
+"""
+import base64
+import io
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+from contextlib import contextmanager
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from PIL import Image
+from framebridge import Ledger, TaskError
+from web_chatgpt import run, probe, collect, new_result, prepare_submission, record_web, normal_download, prepare_image_page, main
+
+
+@unittest.skipUnless(os.environ.get("FRAMEBRIDGE_FIXTURE_BROWSER"), "opt-in isolated browser fixture")
+class BrowserFixtureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+        cls.runtime = sync_playwright().start()
+        cls.addClassCleanup(cls.runtime.stop)
+        cls.browser = cls.runtime.chromium.launch(channel=os.environ['FRAMEBRIDGE_FIXTURE_BROWSER'], headless=True)
+        cls.addClassCleanup(cls.browser.close)
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.ledger = Ledger(self.temporary.name)
+        self.ledger.init()
+        Path(self.temporary.name, "prompts/a.txt").write_text("a white cup, one image", encoding="utf-8")
+        self.ledger.add("A", "prompts/a.txt", [], "outputs/A.png")
+        self.context = self.browser.new_context(accept_downloads=True, service_workers="block")
+        self.addCleanup(self.context.close)
+        output = io.BytesIO()
+        Image.new("RGB", (512, 288), "white").save(output, format="PNG")
+        self.url = "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+        self.html = '''<!doctype html><html><body>
+        <div contenteditable="true" id="prompt-textarea"></div>
+        <input type="file" accept="image/*" multiple>
+        <button data-testid="send-button" onclick="submitOnce()">Send</button>
+        <script>
+        window.sendCount=0;
+        function submitOnce() {
+          window.sendCount++;
+          const u=document.createElement('div'); u.dataset.messageAuthorRole='user';
+          u.textContent=document.querySelector('#prompt-textarea').innerText; document.body.append(u);
+          document.querySelector('#prompt-textarea').textContent='';
+          const a=document.createElement('div'); a.dataset.messageAuthorRole='assistant';
+          const img=document.createElement('img'); img.src='IMAGE_URL'; a.append(img);
+          const button=document.createElement('button'); button.textContent='Download';
+          button.onclick=()=>{ const link=document.createElement('a'); link.download='generated.png'; link.href=img.src; link.click(); };
+          a.append(button); document.body.append(a); history.pushState({}, '', '/c/fixture-A');
+        }
+        </script></body></html>'''.replace("IMAGE_URL", self.url)
+        self.request_count = 0
+        def intercepted(route):
+            self.request_count += 1
+            if route.request.url == "https://chatgpt.com/":
+                route.fulfill(status=200, content_type="text/html", body=self.html)
+            else:
+                route.abort()  # Fail closed: absolutely no external request is allowed.
+        self.context.route("**/*", intercepted)
+        self.page = self.context.new_page()
+        self.page.goto("https://chatgpt.com/")
+
+    def test_one_submit_normal_button_download_verified(self):
+        self.assertFalse(probe(self.page)["request_submitted"])
+        task = run(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=10)
+        self.assertEqual(self.page.evaluate("window.sendCount"), 1)
+        self.assertEqual(task["status"], "completed")
+        self.assertTrue(self.ledger.check("A")["valid_output"])
+        self.assertEqual(self.request_count, 1)  # Fulfilled fixture; no server received it.
+        self.assertEqual(collect(self.ledger, "A", self.page, "http://127.0.0.1:9222" )["status"], "completed")
+        self.assertEqual(self.page.evaluate("window.sendCount"), 1)
+
+    def test_verification_stops_before_submit(self):
+        self.page.evaluate("document.title = 'Just a moment'")
+        with self.assertRaises(TaskError):
+            run(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=10)
+        self.assertEqual(self.page.evaluate("window.sendCount"), 0)
+        self.assertEqual(self.ledger.task(self.ledger.load(), "A")["status"], "pending")
+
+    def test_logged_out_with_two_controls_stops_before_submit(self):
+        self.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button>Log in</button><button>Sign up</button>')")
+        with self.assertRaisesRegex(TaskError, "login_required"):
+            run(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=10)
+        self.assertEqual(self.page.evaluate("window.sendCount"), 0)
+        self.assertEqual(self.ledger.task(self.ledger.load(), "A")["status"], "pending")
+
+    def test_current_composer_role_and_image_entry_label(self):
+        self.page.evaluate("const composer=document.querySelector('#prompt-textarea'); composer.removeAttribute('id'); composer.setAttribute('role','textbox'); document.body.insertAdjacentHTML('beforeend', '<button>创建图像 可视化呈现任何内容</button>')")
+        result = probe(self.page)
+        self.assertTrue(result["composer_editable"])
+        self.assertTrue(result["image_entry_visible"])
+        self.assertEqual(self.page.evaluate("window.sendCount"), 0)
+
+    def test_matching_staged_draft_uses_normal_send(self):
+        self.page.locator('#prompt-textarea').fill('a white cup, one image')
+        self.page.locator('[data-testid="send-button"]').evaluate("el => {el.removeAttribute('data-testid'); el.setAttribute('aria-label','发送')}")
+        task = run(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=10)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(self.page.evaluate("window.sendCount"), 1)
+
+    def test_different_draft_is_preserved_without_submit(self):
+        self.page.locator('#prompt-textarea').fill('my unfinished draft')
+        with self.assertRaises(TaskError):
+            run(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=10)
+        self.assertEqual(self.page.locator('#prompt-textarea').inner_text(), 'my unfinished draft')
+        self.assertEqual(self.page.evaluate("window.sendCount"), 0)
+
+    def modern_result(self, state='complete'):
+        prepare_submission(self.ledger, "A", self.page, "http://127.0.0.1:9222")
+        record_web(self.ledger, "A", page_url=self.page.url)
+        self.page.evaluate("""state => {
+            const user = document.querySelector('[data-message-author-role="user"]');
+            const response = document.querySelector('[data-message-author-role="assistant"]');
+            user.removeAttribute('data-message-author-role');
+            response.removeAttribute('data-message-author-role');
+            response.setAttribute('data-talvt-turn-state', state);
+            const image = response.querySelector('img');
+            const download = response.querySelector('button');
+            const gallery = document.createElement('div');
+            gallery.dataset.testid = 'generated-image-gallery';
+            const preview = document.createElement('button');
+            preview.dataset.testid = 'generated-image-preview';
+            preview.append(image); gallery.append(preview); response.replaceChildren(gallery);
+            const main = document.createElement('main');
+            const userHeading = document.createElement('h2'); userHeading.textContent = '你说：';
+            const assistantHeading = document.createElement('h2'); assistantHeading.textContent = 'ChatGPT 说：';
+            main.append(userHeading, user, assistantHeading, response); document.body.append(main);
+            preview.onclick = () => {
+                const dialog = document.createElement('div'); dialog.setAttribute('role', 'dialog');
+                dialog.setAttribute('aria-modal', 'true'); main.setAttribute('aria-hidden', 'true');
+                dialog.append(download); document.body.append(dialog);
+            };
+        }""", state)
+
+    def test_current_gallery_preview_download_completes_without_resubmit(self):
+        self.modern_result()
+        result = collect(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=10)
+        self.assertEqual(result['status'], 'completed')
+        self.assertTrue(self.ledger.check('A')['valid_output'])
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+        self.assertTrue(Path(self.temporary.name, 'logs/A/timing.md').exists())
+        self.assertTrue(Path(self.temporary.name, 'logs/A/timing.json').exists())
+
+    def test_async_preview_and_download_button_wait_without_resubmit(self):
+        self.modern_result()
+        self.page.evaluate("""() => {
+            window.previewCount = 0;
+            document.querySelector('[data-testid="generated-image-preview"]').onclick = () => {
+                window.previewCount++;
+                setTimeout(() => {
+                    const dialog = document.createElement('div'); dialog.setAttribute('role','dialog');
+                    document.body.append(dialog);
+                    setTimeout(() => {
+                        const button = document.createElement('button'); button.textContent='Download'; button.disabled=true;
+                        button.onclick = () => {
+                            const a=document.createElement('a'); a.download='generated.png';
+                            a.href=document.querySelector('[data-testid="generated-image-preview"] img').src; a.click();
+                        };
+                        dialog.append(button); setTimeout(() => button.disabled=false, 200);
+                    }, 200);
+                }, 200);
+            };
+        }""")
+        progress = []
+        result = collect(self.ledger, 'A', self.page, 'http://127.0.0.1:9222', timeout=10,
+                         progress=lambda phase, **metrics: progress.append(phase))
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.page.evaluate('window.previewCount'), 1)
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+        self.assertIn('opening_preview', progress)
+        self.assertEqual(progress[-1], 'saved')
+
+    def test_missing_preview_timeout_does_not_click_twice(self):
+        self.modern_result()
+        self.page.evaluate("() => {window.previewCount=0; document.querySelector('[data-testid=generated-image-preview]').onclick=()=>window.previewCount++;}")
+        task = self.ledger.task(self.ledger.load(), 'A')
+        result, image = new_result(self.page, task)
+        with self.assertRaises(TaskError):
+            normal_download(self.page, result, image, self.temporary.name, preview_timeout_ms=250)
+        self.assertEqual(self.page.evaluate('window.previewCount'), 1)
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+
+    def test_verification_during_preview_wait_stops_without_download(self):
+        self.modern_result()
+        self.page.evaluate("() => {document.querySelector('[data-testid=generated-image-preview]').onclick=()=>document.title='Just a moment';}")
+        task = self.ledger.task(self.ledger.load(), 'A')
+        result, image = new_result(self.page, task)
+        with self.assertRaisesRegex(TaskError, 'verification'):
+            normal_download(self.page, result, image, self.temporary.name, preview_timeout_ms=250)
+        self.assertFalse(Path(self.temporary.name, 'generated.png').exists())
+
+    def test_image_mode_preparation_waits_default_text_without_submit(self):
+        self.page.evaluate("""() => {
+            const add=document.createElement('button'); add.setAttribute('aria-label','添加文件等内容');
+            add.onclick=()=>{
+                const entry=document.createElement('button'); entry.textContent='创建图像 可视化呈现任何内容';
+                entry.onclick=()=>setTimeout(()=>document.querySelector('#prompt-textarea').textContent='创建图像 ',200);
+                document.body.append(entry);
+            };
+            document.body.append(add);
+        }""")
+        page = prepare_image_page(self.context)
+        self.assertEqual(page.locator('#prompt-textarea').inner_text().strip(), '')
+        self.assertEqual(page.evaluate('window.sendCount'), 0)
+
+    def test_generate_rejects_completed_before_connecting_browser(self):
+        task = run(self.ledger, 'A', self.page, 'http://127.0.0.1:9222', timeout=10)
+        self.assertEqual(task['status'], 'completed')
+        with patch('web_chatgpt.connected_image_page') as connect, patch('sys.stdout', new_callable=io.StringIO):
+            result = main(['--root', self.temporary.name, '--cdp','http://127.0.0.1:9222','generate','A','--confirmed'])
+        self.assertEqual(result, 2)
+        connect.assert_not_called()
+
+    def test_generate_requires_confirmation_before_browser_connect(self):
+        with patch('web_chatgpt.connected_image_page') as connect, patch('sys.stdout', new_callable=io.StringIO):
+            result = main(['--root', self.temporary.name, '--cdp','http://127.0.0.1:9222','generate','A'])
+        self.assertEqual(result, 2)
+        connect.assert_not_called()
+
+    def test_generate_connects_once_and_submits_once(self):
+        @contextmanager
+        def prepared(endpoint):
+            yield self.page
+        with patch('web_chatgpt.connected_image_page', side_effect=prepared) as connect:
+            with patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO):
+                result = main(['--root', self.temporary.name, '--cdp', 'http://127.0.0.1:9222',
+                               'generate', 'A', '--confirmed', '--timeout', '10'])
+        self.assertEqual(result, 0)
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+        self.assertTrue(self.ledger.check('A')['valid_output'])
+
+    def test_current_gallery_streaming_is_not_complete(self):
+        self.modern_result('streaming')
+        task = self.ledger.task(self.ledger.load(), 'A')
+        self.assertIsNone(new_result(self.page, task))
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+        self.assertFalse(Path(self.temporary.name, 'outputs/A.png').exists())
+
+    def test_current_gallery_multiple_images_stop(self):
+        self.modern_result()
+        self.page.get_by_test_id('generated-image-preview').evaluate('el => el.after(el.cloneNode(true))')
+        task = self.ledger.task(self.ledger.load(), 'A')
+        with self.assertRaises(TaskError): new_result(self.page, task)
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+
+    def test_current_gallery_prompt_mismatch_stop(self):
+        self.modern_result()
+        self.page.locator('main h2').nth(0).evaluate("el => el.nextElementSibling.textContent='different request'")
+        task = self.ledger.task(self.ledger.load(), 'A')
+        with self.assertRaises(TaskError): new_result(self.page, task)
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+
+    def test_existing_current_conversation_cannot_start_new_job(self):
+        self.modern_result()
+        self.ledger.stop('A')
+        self.ledger.resolve('A', True)
+        self.ledger.add('B', 'prompts/a.txt', [], 'outputs/B.png')
+        with self.assertRaises(TaskError):
+            run(self.ledger, 'B', self.page, 'http://127.0.0.1:9222', timeout=10)
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+        self.assertEqual(self.ledger.task(self.ledger.load(), 'B')['status'], 'pending')
+
+    def test_download_recovery_preserves_first_generation_timestamp(self):
+        with patch('web_chatgpt.normal_download', side_effect=TaskError('simulated preview delay')):
+            with self.assertRaises(TaskError):
+                run(self.ledger, 'A', self.page, 'http://127.0.0.1:9222', timeout=10)
+        first = self.ledger.task(self.ledger.load(), 'A')['web']['generation_complete_observed_at']
+        recovered = collect(self.ledger, 'A', self.page, 'http://127.0.0.1:9222', timeout=10)
+        timing = recovered['web']['timing']
+        self.assertEqual(timing['generation_complete_observed_at'], first)
+        self.assertGreater(timing['total_to_saved_seconds'], timing['generation_seconds'])
+        self.assertGreaterEqual(timing['download_and_verify_seconds'], 0)
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+        self.assertTrue(self.ledger.check('A')['valid_output'])
+
+    def test_no_overwrite_no_submit(self):
+        Path(self.temporary.name, "outputs/A.png").write_bytes(b"existing")
+        with self.assertRaises(TaskError):
+            run(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=10)
+        self.assertEqual(self.page.evaluate("window.sendCount"), 0)
+
+    def test_collect_timeout_never_sends_again(self):
+        prepare_submission(self.ledger, "A", self.page, "http://127.0.0.1:9222")
+        record_web(self.ledger, "A", page_url=self.page.url)
+        self.page.locator('[data-message-author-role="assistant"] img').evaluate("el => el.remove()")
+        with self.assertRaises(TaskError):
+            collect(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=1)
+        self.assertEqual(self.page.evaluate("window.sendCount"), 1)
+        self.assertFalse(Path(self.temporary.name, "outputs/A.png").exists())
+
+    def test_multiple_images_need_confirmation(self):
+        prepare_submission(self.ledger, "A", self.page, "http://127.0.0.1:9222")
+        self.page.locator('[data-message-author-role="assistant"] img').evaluate("el => el.after(el.cloneNode())")
+        self.page.wait_for_timeout(100)
+        task = self.ledger.task(self.ledger.load(), "A")
+        with self.assertRaises(TaskError): new_result(self.page, task)
+        self.assertEqual(self.page.evaluate("window.sendCount"), 1)
+
+    def test_missing_conversation_identity_refuses_collection(self):
+        prepare_submission(self.ledger, "A", self.page, "http://127.0.0.1:9222")
+        with self.assertRaises(TaskError):
+            collect(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=1)
+        self.assertEqual(self.page.evaluate("window.sendCount"), 1)
+
+    def test_only_explicit_reference_is_uploaded(self):
+        path = Path(self.temporary.name, "references/person.png")
+        output = io.BytesIO()
+        Image.new("RGB", (512, 288), "blue").save(output, format="PNG")
+        path.write_bytes(output.getvalue())
+        Path(self.temporary.name, "prompts/ref.md").write_text("keep this person's identity", encoding="utf-8")
+        self.ledger.add("REF", "prompts/ref.md", ["references/person.png"], "outputs/REF.png")
+        task = run(self.ledger, "REF", self.page, "http://127.0.0.1:9222", timeout=10)
+        uploaded = self.page.locator('input[type="file"]').evaluate("el => Array.from(el.files).map(f => f.name)")
+        self.assertEqual(uploaded, ["reference-01.png"])
+        self.assertEqual(task["status"], "completed")
+        self.assertTrue(path.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
