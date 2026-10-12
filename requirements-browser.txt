@@ -1,0 +1,2 @@
+# Optional normal Playwright only. Do not install Chromium or any stealth package.
+playwright>=1.59,<2

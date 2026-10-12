@@ -1,0 +1,2 @@
+# Offline image decode/verify only. No OpenAI SDK or browser automation runtime.
+Pillow>=10.4,<13
