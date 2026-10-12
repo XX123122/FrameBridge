@@ -1,5 +1,9 @@
 # FrameBridge — ChatGPT 网页图片生成助手
 
+[English introduction and quick start](README.en.md) | 简体中文
+
+FrameBridge is a local Python assistant for personal image generation experiments on Windows. It uses a visible, user-authenticated ChatGPT browser session to submit one authorized task, download the result through the normal page controls, verify the image, and keep a local task and timing record. It includes a Codex Skill and does not call a paid OpenAI API.
+
 Windows / Python 的单人低频实验原型。固定执行一个明确授权的任务：读取本地 Prompt 与参考图 → 发送一次 → 观察完成 → 点击网页正常 Download/Save → 自动保存与验证 → 记录状态。已准备本地 Codex Skill。
 
 **当前状态**：第一阶段已成功实测。用户在独立可见 Edge 手动登录并明确授权 K01 后，程序仅发送一次，通过页面预览的正常“下载”按钮自动取得 PNG，保存为 `outputs/K01.png`，状态 completed。尺寸 1672×941，文件 1,824,583 字节，解码与 SHA-256 校验通过。网页原对话保留，账号与 Codex 账号不同也可使用。没有付费 API、认证提取或私有接口调用。当前版本对纯 Prompt 的一张图片已验证；参考图上传和更广泛队列仍仅有离线测试覆盖。
