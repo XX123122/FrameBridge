@@ -13,6 +13,7 @@ FrameBridge turns a local prompt file into a supervised, single-image browser ta
 ## Features
 
 - UTF-8 `.txt`/`.md` prompts; original bytes and explicitly named PNG/JPEG/WebP references are snapshotted locally.
+- Explicit reference-guided `edit` tasks preserve originals and save a new output; see [reference/edit workflow](docs/REFERENCE_IMAGE_EDIT.md).
 - One task at a time, with `pending`, `running`, `completed`, `failed`, and a separate uncertainty flag.
 - Single-command browser preparation, one submission, normal-page download, and PNG/JPEG/WebP decoding, size and SHA-256 checks.
 - Recovery collects the original request's result; it never resends the prompt. Existing output files are protected.
@@ -30,7 +31,8 @@ FrameBridge turns a local prompt file into a supervised, single-image browser ta
 | Limited serial trial | Two verified saves and one refused task; stopped on failure and resumed only after human approval; [trial record](docs/QUEUE_TRIAL.md) |
 | Same-conversation sequence | Two text-only cat images generated/downloaded in one conversation; [actual timings and scope](docs/SAME_CHAT_BATCH.md) |
 | Chrome / other UI languages or versions | CDP adapter can connect; no equivalent live compatibility claim |
-| Real reference uploads and character identity consistency | Not live-verified; upload controls were tested only in fixtures |
+| Single PNG reference-guided edit | One normal-upload/red-cushion edit/download verified; [evidence and limits](docs/REFERENCE_IMAGE_EDIT.md) |
+| Multiple live references, JPG/WebP upload and identity/pixel consistency | Not live-verified; multiple-upload controls/formats have offline coverage |
 | Large queues | Not live-verified; only the limited serial trial above was observed |
 | GitHub CI, v0.1.0 Release | Workflow/release preparation only until actual remote checks and publication |
 
@@ -94,6 +96,8 @@ Edit the copied file before `add`; snapshots freeze the original. Select referen
 
 ## Codex Skill
 
+For step-by-step setup and copyable instructions to test in another Codex conversation, see the [Chinese usage/test tutorial](docs/TEST_WITH_CODEX.zh-CN.md).
+
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts/install_skill.py
 ```
@@ -136,7 +140,7 @@ No paid OpenAI API, stealth, CAPTCHA solving, credential exports, private-model 
 
 **Does an English README mean the English ChatGPT UI is tested?** No. The currently verified image-mode labels are Chinese. Unsupported labels cause a stop.
 
-**Are reference uploads and preserved identities verified?** Upload paths/formats are covered by offline fixtures; live uploads/identity consistency are not verified. Models may not follow every identity instruction.
+**Are reference uploads and preserved identities verified?** One PNG reference edit/upload/download was observed, with offline format/multiple-input coverage. Live multiple references/JPG/WebP and general identity or pixel preservation are not verified. Models may not follow every identity instruction.
 
 **Can this run as an unattended public service?** That is outside the project's scope. Authorization, account restrictions, unsupported UI and terms risk remain.
 

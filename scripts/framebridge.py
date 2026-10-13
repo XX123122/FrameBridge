@@ -149,6 +149,8 @@ class Ledger:
                 raise TaskError("任务数据或 ID 损坏")
             if task.get("status") not in {"pending", "running", "completed", "failed"}:
                 raise TaskError("任务状态损坏")
+            if task.get('operation', 'generate') not in {'generate', 'edit'}:
+                raise TaskError('任务 operation 损坏')
             task_id = task["id"]
             expected_log = f"logs/{task_id}/task.json"
             if task.get("log_path") != expected_log:
@@ -192,11 +194,13 @@ class Ledger:
         task["events"].append({"at": task["updated_at"], "event": name,
                                "status": task["status"], "phase": task["phase"]})
 
-    def add(self, task_id, prompt, references, output, mode="web-ui"):
+    def add(self, task_id, prompt, references, output, mode="web-ui", operation='generate'):
         if not ID_PATTERN.fullmatch(task_id) or task_id.upper() in RESERVED:
             raise TaskError("任务 ID 必须为 1–64 位 ASCII 字母、数字、下划线或连字符，不能是 Windows 保留名")
         if mode not in {"web-ui", "manual-web", "codex-imagegen"}:
             raise TaskError("不支持的生成路径")
+        if operation not in {'generate', 'edit'} or operation == 'edit' and not references:
+            raise TaskError('edit 操作至少需要一张明确的参考图')
         with self.lock():
             state = self.load()
             if any(t["id"].lower() == task_id.lower() for t in state["tasks"]):
@@ -232,7 +236,7 @@ class Ledger:
                 dest = directory / f"reference-{index:02d}{Path(meta['original_path']).suffix.lower()}"
                 write_exclusive(dest, data)
                 meta["snapshot_path"] = str(dest.relative_to(self.root))
-            task = {"id": task_id, "status": "pending", "phase": "prepared", "mode": mode,
+            task = {"id": task_id, "status": "pending", "phase": "prepared", "mode": mode, 'operation': operation,
                     "needs_confirmation": False, "created_at": now(), "updated_at": now(),
                     "prompt_path": str(pp.relative_to(self.root)), "prompt_snapshot": str(snapshot.relative_to(self.root)),
                     "prompt_sha256": digest(raw), "prompt_text": text, "references": [r for r, _ in refs],
@@ -256,6 +260,7 @@ class Ledger:
         task = self.task(self.load(), task_id)
         self.verify_inputs(task)
         return {"id": task["id"], "mode": task["mode"], "status": task["status"],
+                'operation': task.get('operation', 'generate'),
                 "prompt_text": task["prompt_text"], "prompt_snapshot": str(self.root / task["prompt_snapshot"]),
                 "references": [{**r, "upload_path": str(self.root / r["snapshot_path"])} for r in task["references"]],
                 "output_path": str(self.root / task["output_path"]),
@@ -433,6 +438,7 @@ def main(argv=None):
     add.add_argument("--reference", action="append", default=[])
     add.add_argument("--output", required=True)
     add.add_argument("--mode", choices=["web-ui", "manual-web", "codex-imagegen"], default="web-ui")
+    add.add_argument('--operation', choices=['generate', 'edit'], default='generate', help='edit requires explicit reference images')
     for name in ("show", "packet", "check", "start", "submitted", "stop", "resolve", "import", "confirm-output"):
         command = commands.add_parser(name)
         command.add_argument("id")
@@ -448,7 +454,7 @@ def main(argv=None):
     try:
         if args.command == "doctor": result = doctor()
         elif args.command == "init": result = ledger.init()
-        elif args.command == "add": result = ledger.add(args.id, args.prompt, args.reference, args.output, args.mode)
+        elif args.command == "add": result = ledger.add(args.id, args.prompt, args.reference, args.output, args.mode, args.operation)
         elif args.command == "list": result = [{k: t[k] for k in ("id", "status", "phase", "needs_confirmation", "output_path")} for t in ledger.load()["tasks"]]
         elif args.command == "show": result = ledger.task(ledger.load(), args.id)
         elif args.command == "packet": result = ledger.packet(args.id)

@@ -222,6 +222,7 @@ prompts/*
 !prompts/example.md
 !prompts/cat-sequence-01.md
 !prompts/cat-sequence-02.md
+!prompts/cat-edit-cushion.md
 !prompts/prompt.txt
 !prompts/K01.md
 !prompts/K02.md

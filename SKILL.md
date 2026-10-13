@@ -1,6 +1,6 @@
 ---
 name: framebridge-web-imagegen
-description: Prepare and supervise local ChatGPT web image tasks from txt/md prompts and named references, or an explicitly approved text-only sequence in one conversation; save, validate, and recover through a user-configured visible browser. Use for FrameBridge workflows, not paid API image generation.
+description: Prepare, generate or edit local ChatGPT web images from txt/md prompts and explicitly named references, or supervise an approved text-only sequence in one conversation; save, validate and recover through a user-configured visible browser. Use for FrameBridge workflows, not paid API image generation.
 ---
 
 Project root: `PROJECT_ROOT_VALUE`. Installation substitutes the current checkout. An uninstalled source entry uses the checkout containing `scripts/framebridge.py`; do not guess another project. Read `README.md`, `docs/SETUP.md`, and `docs/RISKS.md` before first use.
@@ -22,11 +22,15 @@ Before submitting/uploading, establish current-user authorization for the specif
 
 For an explicitly requested same-conversation sequence, read `docs/SAME_CHAT_BATCH.md`. Freeze all prompts/output paths first and establish approval for the exact finite task list/image count. Use `web_chatgpt.py --cdp ENDPOINT batch ID1 ID2 --confirmed --timeout 300` once; it starts a fresh conversation and submits each task only after the preceding image is downloaded and verified. Initial scope is text-only; references are rejected before browser access. Later tasks inherit the conversation context. Do not rerun a stopped batch or silently skip/rewrite a task; only collect the submitted result on its original URL and ask for the user's decision on remaining tasks.
 
+For reference-guided edits, read `docs/REFERENCE_IMAGE_EDIT.md`. Explicitly select the source images and preserve them; copy chosen existing outputs into references/ without overwriting or resizing. Prepare with `add ID --operation edit --prompt ... --reference references/image.png --output outputs/ID.png`. Once that exact prompt/reference list/one-image edit is authorized, execute `web_chatgpt.py --cdp ENDPOINT edit ID --confirmed --timeout 300`. It uses the normal upload chooser and one Send; no arbitrary hidden-input choice, region-mask/private API or old-reference download. Check the file and compare it visually with the source; report deviations honestly without another generation. Reference inputs are not supported in batch yet.
+
 ## Recovery and stopping
 
 Stop at verification, quota/permission errors, ambiguous controls/results, timeouts or interruption. No challenge solving, stealth, protection changes or infinite retries. A local stop does not cancel the remote request.
 
 `recover` marks abandoned running tasks uncertain without resubmission. With current-user recovery consent, use `--page ORIGINAL_URL collect ID --confirmed` only. A file written before status persistence is recovered with `confirm-output ID --confirmed` and the recorded hash, never overwritten. `resolve ID --confirmed` closes uncertainty only after the user reviews it. New generation requires a new task and its own authorization.
+
+Exception for an edit that provably never reached Send: an explicitly authorized `--page https://chatgpt.com/ resume-draft ID --confirmed` validates its original uploaded draft and can make its first submission without uploading again. Read the strict checks in `docs/REFERENCE_IMAGE_EDIT.md`; no submission intent/event/timestamp may exist, and all prompt/reference/page/state checks must pass. This never applies to a submitted or ambiguous request, never silently changes files/prompt, and is not an automatic retry.
 
 Do not read/export cookies, tokens, passwords, authentication databases/storage or headers. Upload named reference images only, never logs, tasks.json, prompt files or a project directory. Web automation is unofficial; automated output collection has service-terms risk. Personal/low-volume usage establishes no platform exemption. Do not fall back to paid APIs or another backend unless separately requested and permitted by user constraints.
 

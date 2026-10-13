@@ -50,6 +50,24 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual((self.root / task["prompt_snapshot"]).read_bytes(), self.raw)
         self.assertEqual(packet["prompt_text"], self.raw.decode("utf-8-sig"))
 
+    def test_edit_requires_reference_and_freezes_intent(self):
+        with self.assertRaises(TaskError):
+            self.ledger.add('EDIT','prompts/K01.md',[],'outputs/EDIT.png',operation='edit')
+        self.assertFalse((self.root/'logs/EDIT').exists())
+        (self.root/'references/cat.png').write_bytes(png('blue'))
+        task=self.ledger.add('EDIT','prompts/K01.md',['references/cat.png'],'outputs/EDIT.png',operation='edit')
+        self.assertEqual(self.ledger.packet('EDIT')['operation'],'edit')
+        (self.root/'references/cat.png').write_bytes(png('green'))
+        self.ledger.verify_inputs(task)
+        self.assertEqual((self.root/task['references'][0]['snapshot_path']).read_bytes(),png('blue'))
+
+    def test_legacy_tasks_without_operation_still_load(self):
+        self.add()
+        state=self.ledger.load()
+        state['tasks'][0].pop('operation')
+        self.ledger.save(state)
+        self.assertEqual(self.ledger.packet('K01')['operation'],'generate')
+
     def test_confirmation_and_serial_queue(self):
         self.add()
         self.add("K02")

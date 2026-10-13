@@ -39,10 +39,12 @@ Later same-conversation work on `codex/same-chat-batch` is recorded in [SAME_CHA
 - Actual GitHub Actions jobs after an approved push; Windows/Linux/Python matrix is a proposed scope, not demonstrated remote compatibility.
 - Fresh-user/new-machine clone, browser policy/install variants, Codex discovery and Skill migration in a real new environment.
 - Dependency vulnerability/advisory review beyond a secret heuristic; runtime package ranges are not a reproducible security guarantee.
-- Real reference uploads/identity behavior (not live-tested), Chrome/other UI language versions and general batch behavior beyond specific observations.
+- Multiple live reference uploads/JPG/WebP/identity behavior beyond the later single-PNG edit trial, Chrome/other UI language versions and general batch behavior beyond specific observations.
 - Approved, real, redacted demo media; present directory contains instructions only.
 
 ## Pending manual / publication
+
+Later work on `codex/reference-image-edit`: [reference/edit evidence](REFERENCE_IMAGE_EDIT.md) records 78 offline tests passed in 71.899 s and one real PNG edit uploaded/downloaded through normal controls. It stopped once before Send for paragraph-rendering mismatch, then resumed the unchanged never-submitted draft without reuploading; actual Send count was one. The user subsequently authorized a repository commit/push/PR for this feature. Remote CI must be observed on its exact revision; earlier preparation/CI records do not validate it. Tag, Release and promotion remain separate decisions.
 
 Review diff and privacy findings; decide author identity/settings; observe CI on the user-approved PR; enable/check private reporting; paste About Description/Topics; approve demo rights; review release notes; explicitly approve Tag/Release; approve each community post/list PR. Publication and metadata steps remain manual. gh was not logged in when checked; metadata fields are supplied in [GITHUB_SETTINGS.md](GITHUB_SETTINGS.md).
 
