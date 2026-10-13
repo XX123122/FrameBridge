@@ -186,7 +186,7 @@ def fail_uncertain(ledger, task_id):
         ledger.stop(task_id, "uncertain")
 
 
-def prepare_submission(ledger, task_id, page, endpoint):
+def prepare_submission(ledger, task_id, page, endpoint, previous_task_id=None):
     task = ledger.task(ledger.load(), task_id)
     if task["mode"] != "web-ui":
         raise TaskError("任务路径不匹配；不会切换到网页")
@@ -199,12 +199,18 @@ def prepare_submission(ledger, task_id, page, endpoint):
         raise TaskError("当前页面正在生成，停止")
     current_headings = page.locator('main').get_by_role(
         'heading', name=re.compile(r'^(你说：|You said:|ChatGPT 说：|ChatGPT said:)$'), include_hidden=True)
-    if (page.url != 'https://chatgpt.com/' or page.locator(USER).count()
+    continuation = {}
+    if previous_task_id is not None:
+        from conversation_batch import continuation_baseline
+        continuation = continuation_baseline(ledger, previous_task_id, page, endpoint)
+    elif (page.url != 'https://chatgpt.com/' or page.locator(USER).count()
             or page.locator(ASSISTANT).count() or current_headings.count()):
         raise TaskError("首次提交必须使用空白新对话，避免混淆旧结果")
     ledger.start(task_id, confirmed=True)
     record_web(ledger, task_id, endpoint=endpoint, page_url=page.url,
-               baseline_assistant_count=0, baseline_user_count=0, backend="playwright-ui")
+               baseline_assistant_count=continuation.get('baseline_assistant_count', 0),
+               baseline_user_count=continuation.get('baseline_user_count', 0), backend="playwright-ui",
+               **{k: v for k, v in continuation.items() if k not in {'baseline_assistant_count', 'baseline_user_count'}})
     # Only explicit, immutable reference snapshots are attached; never upload a directory.
     if task["references"]:
         inputs = page.locator('input[type="file"][accept*="image"]')
@@ -243,6 +249,12 @@ def prepare_submission(ledger, task_id, page, endpoint):
 
 def new_result(page, task):
     guard(page)
+    recorded_url = task.get('web', {}).get('page_url')
+    if recorded_url and recorded_url != 'https://chatgpt.com/' and page.url != recorded_url:
+        raise TaskError('Conversation changed during observation; stop')
+    if task.get('web', {}).get('baseline_history'):
+        from conversation_batch import batch_result
+        return batch_result(page, task)
     users = page.locator(USER)
     assistants = page.locator(ASSISTANT)
     baseline = task["web"]["baseline_assistant_count"]
@@ -309,8 +321,11 @@ def new_result(page, task):
     return (result, generated[0]) if generated else None
 
 
-def normal_download(page, result, image, directory, *, progress=None, preview_timeout_ms=PREVIEW_TIMEOUT_MS):
+def normal_download(page, result, image, directory, *, progress=None, preview_timeout_ms=PREVIEW_TIMEOUT_MS,
+                    allow_active_preview=True):
     active_dialog = unique_visible(page.get_by_role('dialog'), '图片预览', False)
+    if active_dialog is not None and not allow_active_preview:
+        raise TaskError('Open viewer may belong to an earlier image; close it before collecting this batch task')
     if active_dialog is not None:
         button = wait_ready(page, active_dialog.get_by_role('button', name=DOWNLOAD_NAME), '预览下载按钮', preview_timeout_ms)
     else:
@@ -400,7 +415,8 @@ def collect(ledger, task_id, page, endpoint, timeout=180, progress=None):
             with tempfile.TemporaryDirectory(prefix="framebridge-download-") as directory:
                 download_at, download_clock = now(), time.monotonic()
                 record_web(ledger, task_id, download_started_at=download_at)
-                downloaded = normal_download(page, *ready, directory, progress=progress)
+                downloaded = normal_download(page, *ready, directory, progress=progress,
+                                             allow_active_preview=not bool(web.get('batch_id')))
                 record_web(ledger, task_id, output_matched="unique_new_assistant_image_normal_download")
                 ledger.import_image(task_id, downloaded, confirmed=True, convert_png=True)
                 finished_at, finished_clock = now(), time.monotonic()
@@ -431,12 +447,15 @@ def collect(ledger, task_id, page, endpoint, timeout=180, progress=None):
     raise TaskError("观察超时；结果待确认，仅恢复 collect，禁止重新提交")
 
 
-def run(ledger, task_id, page, endpoint, timeout=180, progress=None):
+def run(ledger, task_id, page, endpoint, timeout=180, progress=None, previous_task_id=None):
     try:
-        prepare_submission(ledger, task_id, page, endpoint)
+        prepare_submission(ledger, task_id, page, endpoint, previous_task_id)
         if progress: progress('submitted')
         # URL assignment can lag the send click. Wait once, without resubmission.
         page.wait_for_url(re.compile(r"https://chatgpt\.com/c/[A-Za-z0-9-]+$"), timeout=30_000)
+        known_url = ledger.task(ledger.load(), task_id).get('web', {}).get('page_url')
+        if known_url and known_url != 'https://chatgpt.com/' and page.url != known_url:
+            raise TaskError('Conversation changed after Send; preserve original recovery URL')
         record_web(ledger, task_id, page_url=page.url)
         return collect(ledger, task_id, page, endpoint, timeout, progress=progress)
     except BaseException:
@@ -446,7 +465,8 @@ def run(ledger, task_id, page, endpoint, timeout=180, progress=None):
         if task.get("web", {}).get("submission_intent"):
             try:
                 current_url = checked_page(page.url)
-                if current_url != "https://chatgpt.com/":
+                known_url = task.get('web', {}).get('page_url')
+                if current_url != "https://chatgpt.com/" and known_url in {None, 'https://chatgpt.com/'}:
                     record_web(ledger, task_id, page_url=current_url)
             except (AttributeError, TaskError):
                 pass
@@ -466,13 +486,28 @@ def main(argv=None):
         command.add_argument("id")
         command.add_argument("--confirmed", action="store_true", help="用户明确授权这一个任务及正常按钮下载")
         command.add_argument("--timeout", type=int, default=180)
+    batch = commands.add_parser('batch', help='Explicit finite task list: one conversation, serial Send/Download')
+    batch.add_argument('ids', nargs='+')
+    batch.add_argument('--confirmed', action='store_true', help='Current user approved all listed prompts, image count and downloads')
+    batch.add_argument('--timeout', type=int, default=180)
     args = parser.parse_args(argv)
     ledger = Ledger(args.root)
     try:
         if args.command != "probe" and not args.confirmed:
-            raise TaskError("缺少单任务确认；不会提交、上传或下载")
+            raise TaskError("缺少明确任务确认；不会提交、上传或下载")
         if args.command != "probe" and not 1 <= args.timeout <= 600:
             raise TaskError("观察时间必须为 1–600 秒")
+        if args.command == 'batch':
+            if args.page is not None:
+                raise TaskError('batch starts a fresh conversation; it does not adopt an unrelated --page')
+            from conversation_batch import run_batch
+            result = run_batch(ledger, args.ids, checked_endpoint(args.cdp), args.timeout,
+                               confirmed=args.confirmed,
+                               progress=lambda task_id, phase, **metrics: print(json.dumps(
+                                   {'task': task_id, 'phase': phase, **metrics}, ensure_ascii=False),
+                                   file=sys.stderr, flush=True))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         if args.command == 'generate':
             if args.page is not None:
                 raise TaskError('generate 自动准备空白页，不接受 --page；指定页面请使用 run')

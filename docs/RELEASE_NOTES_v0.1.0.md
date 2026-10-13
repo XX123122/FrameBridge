@@ -6,12 +6,14 @@
 
 - Local Windows/Python 3.11+ workflow with standard Playwright and visible, current-user-configured Edge.
 - txt/md originals, named PNG/JPEG/WebP references, single-task approval, serial states, normal download, file verification and recovery without resend.
+- Finite explicitly approved text-only `batch` lists in one conversation, with scoped history boundaries and individual downloads; reference uploads are not supported by this new batch path.
 - Codex Skill entry/installer, moved-project update and reviewed legacy migration; installing grants no browser or generation authority.
 
 ## Tested
 
 - Earlier authorized Windows/Edge/Chinese-UI text-only trials are recorded in [historical experiments](HISTORICAL_EXPERIMENTS.md).
 - A later explicitly authorized [serial trial](QUEUE_TRIAL.md) saved Q01 and Q03; Q02 was refused, stopped the runner, and was closed by the user before Q03 resumed. This is not three successful unattended generations.
+- A separate [same-conversation cat sequence](SAME_CHAT_BATCH.md) saved two images, with local offline legacy/current-DOM and recovery fixtures. This new feature still needs remote CI/fresh-user verification.
 - Local offline logic/browser evidence and release checks are recorded in [RELEASE_READINESS.md](RELEASE_READINESS.md). Do not conflate mocked upload tests with real uploads.
 - GitHub Actions Windows/Linux/Python matrix is defined but **remote success is pending** until the first actual run. No passing badge is claimed.
 

@@ -16,6 +16,7 @@ FrameBridge turns a local prompt file into a supervised, single-image browser ta
 - One task at a time, with `pending`, `running`, `completed`, `failed`, and a separate uncertainty flag.
 - Single-command browser preparation, one submission, normal-page download, and PNG/JPEG/WebP decoding, size and SHA-256 checks.
 - Recovery collects the original request's result; it never resends the prompt. Existing output files are protected.
+- An explicitly approved finite `batch` can generate/download serial images in one conversation; initial scope is text-only. See [same-chat workflow](docs/SAME_CHAT_BATCH.md).
 - Progress updates and local JSON/Markdown timing reports.
 - A portable Codex Skill for task preparation, execution, checking and recovery. Installation grants no browser or generation permission.
 
@@ -27,6 +28,7 @@ FrameBridge turns a local prompt file into a supervised, single-image browser ta
 | Python 3.11, Playwright, Pillow | Historical local Windows tests; current results in [release readiness](docs/RELEASE_READINESS.md) |
 | Task state, recovery, formats, uploads and UI edge cases | Offline logic tests and mocked browser fixtures; not proof of live reference uploads |
 | Limited serial trial | Two verified saves and one refused task; stopped on failure and resumed only after human approval; [trial record](docs/QUEUE_TRIAL.md) |
+| Same-conversation sequence | Two text-only cat images generated/downloaded in one conversation; [actual timings and scope](docs/SAME_CHAT_BATCH.md) |
 | Chrome / other UI languages or versions | CDP adapter can connect; no equivalent live compatibility claim |
 | Real reference uploads and character identity consistency | Not live-verified; upload controls were tested only in fixtures |
 | Large queues | Not live-verified; only the limited serial trial above was observed |

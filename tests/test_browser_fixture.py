@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from PIL import Image
 from framebridge import Ledger, TaskError
 from web_chatgpt import run, probe, collect, new_result, prepare_submission, record_web, normal_download, prepare_image_page, main
+from conversation_batch import run_batch, close_preview, history
 
 
 @unittest.skipUnless(os.environ.get("FRAMEBRIDGE_FIXTURE_BROWSER"), "opt-in isolated browser fixture")
@@ -239,6 +240,170 @@ class BrowserFixtureTests(unittest.TestCase):
         self.assertEqual(connect.call_count, 1)
         self.assertEqual(self.page.evaluate('window.sendCount'), 1)
         self.assertTrue(self.ledger.check('A')['valid_output'])
+
+    def batch_fixture(self, refusal=False):
+        output = io.BytesIO()
+        Image.new('RGB', (512, 288), 'blue').save(output, format='PNG')
+        self.second_url = 'data:image/png;base64,' + base64.b64encode(output.getvalue()).decode('ascii')
+        Path(self.temporary.name, 'prompts/b.txt').write_text('the cat stretches, one image', encoding='utf-8')
+        self.ledger.add('B', 'prompts/b.txt', [], 'outputs/B.png')
+        self.page.evaluate('''([first,second,refusal]) => {
+            const main=document.createElement('main'); document.body.append(main);
+            window.submitOnce=()=>{
+                window.sendCount++;
+                const turn=document.createElement('div'); turn.dataset.talvtTurnState='complete';
+                const uh=document.createElement('h4'); uh.textContent='你说：';
+                const user=document.createElement('div'); user.textContent=document.querySelector('#prompt-textarea').innerText;
+                const ah=document.createElement('h4'); ah.textContent='ChatGPT 说：';
+                turn.append(uh,user,ah); main.append(turn);
+                document.querySelector('#prompt-textarea').textContent='';
+                if(refusal && window.sendCount===2){
+                    const text=document.createElement('p'); text.textContent='抱歉，我不能生成这张图片。'; turn.append(text);
+                }else{
+                    const gallery=document.createElement('div'); gallery.dataset.testid='generated-image-gallery';
+                    const preview=document.createElement('button'); preview.dataset.testid='generated-image-preview';
+                    const image=document.createElement('img'); image.src=window.sendCount===1?first:second;
+                    preview.append(image); gallery.append(preview); turn.append(gallery);
+                    preview.onclick=()=>{
+                        const dialog=document.createElement('div'); dialog.setAttribute('role','dialog');
+                        main.setAttribute('aria-hidden','true');
+                        const download=document.createElement('button'); download.textContent='Download';
+                        download.onclick=()=>{ const a=document.createElement('a');a.download='generated.png';a.href=image.src;a.click(); };
+                        const close=document.createElement('button');close.setAttribute('aria-label','关闭查看器');
+                        close.onclick=()=>{dialog.remove();main.removeAttribute('aria-hidden');};
+                        dialog.append(download,close);document.body.append(dialog);
+                    };
+                }
+                history.pushState({},'','/c/fixture-A');
+            };
+        }''', [self.url, self.second_url, refusal])
+
+    @contextmanager
+    def batch_page(self, endpoint):
+        yield self.page
+
+    def test_same_chat_batch_two_unique_downloads_one_connection(self):
+        self.batch_fixture()
+        with patch('conversation_batch.connected_image_page', side_effect=self.batch_page) as connect:
+            result = run_batch(self.ledger, ['A','B'], 'http://127.0.0.1:9222', 10, confirmed=True)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(self.page.evaluate('window.sendCount'), 2)
+        self.assertEqual(len(result['completed']), 2)
+        a=self.ledger.task(self.ledger.load(),'A'); b=self.ledger.task(self.ledger.load(),'B')
+        self.assertEqual(a['web']['page_url'], b['web']['page_url'])
+        self.assertNotEqual(a['artifact']['sha256'], b['artifact']['sha256'])
+        self.assertEqual(b['web']['previous_task_id'], 'A')
+        self.assertEqual(len(b['web']['baseline_history']['prefix']), 1)
+        self.assertTrue(self.ledger.check('B')['valid_output'])
+        self.assertEqual(self.page.get_by_role('dialog').count(), 0)
+
+    def test_batch_refusal_stops_and_leaves_third_pending(self):
+        self.batch_fixture(refusal=True)
+        self.ledger.add('C','prompts/b.txt',[],'outputs/C.png')
+        with patch('conversation_batch.connected_image_page', side_effect=self.batch_page):
+            with self.assertRaisesRegex(TaskError,'platform_refusal'):
+                run_batch(self.ledger,['A','B','C'],'http://127.0.0.1:9222',10,confirmed=True)
+        self.assertEqual(self.page.evaluate('window.sendCount'),2)
+        self.assertEqual(self.ledger.task(self.ledger.load(),'C')['status'],'pending')
+        self.assertTrue(self.ledger.task(self.ledger.load(),'B')['needs_confirmation'])
+        self.assertFalse(Path(self.temporary.name,'outputs/B.png').exists())
+
+    def test_batch_preflight_no_authority_duplicate_and_existing_output(self):
+        self.batch_fixture()
+        with patch('conversation_batch.connected_image_page') as connect:
+            with self.assertRaises(TaskError): run_batch(self.ledger,['A','B'],'http://127.0.0.1:9222')
+            with self.assertRaises(TaskError): run_batch(self.ledger,['A','A'],'http://127.0.0.1:9222',confirmed=True)
+            Path(self.temporary.name,'outputs/B.png').write_bytes(b'keep')
+            with self.assertRaises(TaskError): run_batch(self.ledger,['A','B'],'http://127.0.0.1:9222',confirmed=True)
+            connect.assert_not_called()
+        self.assertEqual(self.page.evaluate('window.sendCount'),0)
+
+    def test_batch_does_not_download_old_gallery_while_new_turn_streams(self):
+        self.batch_fixture()
+        run(self.ledger,'A',self.page,'http://127.0.0.1:9222',10)
+        close_preview(self.page)
+        record_web(self.ledger,'A',conversation_history=history(self.page))
+        prepare_submission(self.ledger,'B',self.page,'http://127.0.0.1:9222',previous_task_id='A')
+        self.page.locator('main [data-talvt-turn-state]').nth(1).evaluate("el=>{el.dataset.talvtTurnState='streaming';el.querySelector('[data-testid=generated-image-gallery]').remove();}")
+        self.assertIsNone(new_result(self.page,self.ledger.task(self.ledger.load(),'B')))
+        self.assertFalse(Path(self.temporary.name,'outputs/B.png').exists())
+
+    def test_batch_history_change_stops_before_second_send(self):
+        self.batch_fixture()
+        run(self.ledger,'A',self.page,'http://127.0.0.1:9222',10)
+        close_preview(self.page)
+        record_web(self.ledger,'A',conversation_history=history(self.page))
+        self.page.locator('main h4').nth(0).evaluate("el=>el.nextElementSibling.textContent='changed prompt'")
+        with self.assertRaisesRegex(TaskError,'Conversation changed'):
+            run(self.ledger,'B',self.page,'http://127.0.0.1:9222',10,previous_task_id='A')
+        self.assertEqual(self.page.evaluate('window.sendCount'),1)
+        self.assertEqual(self.ledger.task(self.ledger.load(),'B')['status'],'pending')
+
+    def test_batch_old_preview_and_extra_turn_refused(self):
+        self.batch_fixture()
+        run(self.ledger,'A',self.page,'http://127.0.0.1:9222',10)
+        close_preview(self.page)
+        record_web(self.ledger,'A',conversation_history=history(self.page))
+        prepare_submission(self.ledger,'B',self.page,'http://127.0.0.1:9222',previous_task_id='A')
+        result,image=new_result(self.page,self.ledger.task(self.ledger.load(),'B'))
+        self.page.get_by_test_id('generated-image-preview').nth(0).click()
+        with self.assertRaisesRegex(TaskError,'earlier image'):
+            normal_download(self.page,result,image,self.temporary.name,allow_active_preview=False)
+        close_preview(self.page)
+        self.page.locator('main [data-talvt-turn-state]').nth(1).evaluate('el=>el.after(el.cloneNode(true))')
+        with self.assertRaisesRegex(TaskError,'Extra conversation turns'):
+            new_result(self.page,self.ledger.task(self.ledger.load(),'B'))
+
+    def test_navigation_after_submit_preserves_original_recovery_url(self):
+        def navigated(ledger, task_id, page, endpoint, timeout, **kwargs):
+            page.evaluate("history.pushState({},'','/c/unrelated')")
+            return new_result(page, ledger.task(ledger.load(), task_id))
+        with patch('web_chatgpt.collect', side_effect=navigated):
+            with self.assertRaisesRegex(TaskError,'Conversation changed'):
+                run(self.ledger,'A',self.page,'http://127.0.0.1:9222',10)
+        task = self.ledger.task(self.ledger.load(),'A')
+        self.assertEqual(task['web']['page_url'],'https://chatgpt.com/c/fixture-A')
+        self.assertEqual(self.page.evaluate('window.sendCount'),1)
+        self.assertTrue(task['needs_confirmation'])
+
+    def test_legacy_same_chat_batch_downloads_latest_response(self):
+        Path(self.temporary.name,'prompts/b.txt').write_text('the cat stretches, one image',encoding='utf-8')
+        self.ledger.add('B','prompts/b.txt',[],'outputs/B.png')
+        output=io.BytesIO()
+        Image.new('RGB',(512,288),'blue').save(output,format='PNG')
+        second='data:image/png;base64,'+base64.b64encode(output.getvalue()).decode('ascii')
+        self.page.evaluate('''second=>{
+            const original=window.submitOnce;
+            window.submitOnce=()=>{original();if(window.sendCount===2){
+                const all=document.querySelectorAll('[data-message-author-role=assistant] img');
+                all[all.length-1].src=second;
+            }};
+        }''',second)
+        with patch('conversation_batch.connected_image_page',side_effect=self.batch_page):
+            run_batch(self.ledger,['A','B'],'http://127.0.0.1:9222',10,confirmed=True)
+        a=self.ledger.task(self.ledger.load(),'A');b=self.ledger.task(self.ledger.load(),'B')
+        self.assertEqual(self.page.evaluate('window.sendCount'),2)
+        self.assertEqual(b['web']['baseline_history']['style'],'legacy')
+        self.assertNotEqual(a['artifact']['sha256'],b['artifact']['sha256'])
+
+    def test_batch_second_download_recovery_does_not_resubmit(self):
+        self.batch_fixture()
+        calls=[]
+        def interrupted(*args,**kwargs):
+            calls.append(1)
+            if len(calls)==2: raise TaskError('simulated second download interruption')
+            return normal_download(*args,**kwargs)
+        with patch('conversation_batch.connected_image_page',side_effect=self.batch_page), \
+             patch('web_chatgpt.normal_download',side_effect=interrupted):
+            with self.assertRaisesRegex(TaskError,'second download interruption'):
+                run_batch(self.ledger,['A','B'],'http://127.0.0.1:9222',10,confirmed=True)
+        first=Path(self.temporary.name,'outputs/A.png').read_bytes()
+        recovered=collect(self.ledger,'B',self.page,'http://127.0.0.1:9222',10)
+        self.assertEqual(recovered['status'],'completed')
+        self.assertEqual(self.page.evaluate('window.sendCount'),2)
+        self.assertEqual(Path(self.temporary.name,'outputs/A.png').read_bytes(),first)
+        self.assertNotEqual(self.ledger.task(self.ledger.load(),'A')['artifact']['sha256'],recovered['artifact']['sha256'])
 
     def test_current_gallery_streaming_is_not_complete(self):
         self.modern_result('streaming')

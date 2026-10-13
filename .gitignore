@@ -220,6 +220,8 @@ references/*
 prompts/*
 !prompts/.gitkeep
 !prompts/example.md
+!prompts/cat-sequence-01.md
+!prompts/cat-sequence-02.md
 !prompts/prompt.txt
 !prompts/K01.md
 !prompts/K02.md
