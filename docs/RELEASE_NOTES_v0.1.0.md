@@ -7,6 +7,7 @@
 - Local Windows/Python 3.11+ workflow with standard Playwright and visible, current-user-configured Edge.
 - txt/md originals, named PNG/JPEG/WebP references, single-task approval, serial states, normal download, file verification and recovery without resend.
 - Finite explicitly approved text-only `batch` lists in one conversation, with scoped history boundaries and individual downloads; reference uploads are not supported by this new batch path.
+- Explicit individual reference-guided `edit` tasks, normal file chooser/readiness checks and guarded recovery of unchanged never-submitted drafts. See [single-PNG live evidence and limits](REFERENCE_IMAGE_EDIT.md).
 - Codex Skill entry/installer, moved-project update and reviewed legacy migration; installing grants no browser or generation authority.
 
 ## Tested

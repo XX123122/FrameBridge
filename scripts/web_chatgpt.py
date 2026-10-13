@@ -40,6 +40,19 @@ def composer_matches(actual, prompt):
     return actual.replace("\r\n", "\n").rstrip("\n") == prompt.replace("\r\n", "\n").rstrip("\n")
 
 
+def composer_text(composer):
+    # ProseMirror innerText adds visual paragraph spacing. Serialize its plain
+    # paragraph structure instead, preserving every internal blank line/space.
+    return composer.evaluate('''el => {
+        const nodes=Array.from(el.childNodes);
+        if(!nodes.length || !nodes.every(n=>n.nodeType===1 && n.tagName==='P')) return el.innerText;
+        const read=n=>n.nodeType===3?n.textContent:n.nodeType!==1?'':
+            n.tagName==='BR'?(n.classList.contains('ProseMirror-trailingBreak')?'':'\\n'):
+            Array.from(n.childNodes).map(read).join('');
+        return nodes.map(read).join('\\n');
+    }''')
+
+
 def checked_endpoint(value):
     url = urlparse(value)
     if (url.scheme != "http" or url.hostname not in {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -192,7 +205,7 @@ def prepare_submission(ledger, task_id, page, endpoint, previous_task_id=None):
         raise TaskError("任务路径不匹配；不会切换到网页")
     probe(page)
     composer = unique_visible(page.locator(COMPOSER), "输入框")
-    existing = composer.inner_text()
+    existing = composer_text(composer)
     if existing.strip() and not composer_matches(existing, task["prompt_text"]):
         raise TaskError("输入框已有不同内容；不会替换用户草稿")
     if unique_visible(page.locator(STOP), "生成中", False):
@@ -213,26 +226,36 @@ def prepare_submission(ledger, task_id, page, endpoint, previous_task_id=None):
                **{k: v for k, v in continuation.items() if k not in {'baseline_assistant_count', 'baseline_user_count'}})
     # Only explicit, immutable reference snapshots are attached; never upload a directory.
     if task["references"]:
-        inputs = page.locator('input[type="file"][accept*="image"]')
-        if inputs.count() == 0:
-            inputs = page.locator('input[type="file"]')
-        if inputs.count() != 1:
-            raise TaskError("找不到唯一图片文件输入；请人工打开上传菜单，再恢复人工流程，不重发")
-        inputs.set_input_files([str(ledger.root / r["snapshot_path"]) for r in task["references"]])
-        selected = inputs.evaluate("el => Array.from(el.files || []).map(file => file.name)")
-        expected = [Path(r["snapshot_path"]).name for r in task["references"]]
-        if selected != expected:
-            raise TaskError("上传控件未保留明确的参考图清单，停止")
-        # Upload acceptance is not the same as upload completion. The enabled send
-        # button below must be stable after the prompt is filled.
+        from reference_upload import upload_references
+        record_web(ledger, task_id, reference_upload_started_at=now())
+        upload = upload_references(ledger, task, page)
+        record_web(ledger, task_id, reference_upload=upload)
     composer.fill(task["prompt_text"])
-    if not composer_matches(composer.inner_text(), task["prompt_text"]):
+    if not composer_matches(composer_text(composer), task["prompt_text"]):
         raise TaskError("网页输入内容与原始 Prompt 不一致，停止")
+    send_prepared(ledger, task_id, page)
+
+
+def send_prepared(ledger, task_id, page):
+    task = ledger.task(ledger.load(), task_id)
+    if not composer_matches(composer_text(unique_visible(page.locator(COMPOSER), 'Composer')), task['prompt_text']):
+        raise TaskError('Prepared draft changed; do not Send')
     button = unique_visible(page.locator(SEND), "发送按钮")
     button.wait_for(state="visible", timeout=30_000)
     deadline = time.monotonic() + 30
-    while not button.is_enabled():
+    while True:
         guard(page)
+        if task['references']:
+            from reference_upload import assert_upload_ok
+            assert_upload_ok(page)
+        if button.is_enabled():
+            if not task['references']:
+                break
+            page.wait_for_timeout(500)
+            guard(page)
+            assert_upload_ok(page)
+            if button.is_enabled():
+                break
         if time.monotonic() >= deadline:
             raise TaskError("上传/发送未就绪；不会点击或重新提交")
         page.wait_for_timeout(500)
@@ -447,30 +470,86 @@ def collect(ledger, task_id, page, endpoint, timeout=180, progress=None):
     raise TaskError("观察超时；结果待确认，仅恢复 collect，禁止重新提交")
 
 
+def finish_submission(ledger, task_id, page, endpoint, timeout, progress):
+    if progress: progress('submitted')
+    page.wait_for_url(re.compile(r"https://chatgpt\.com/c/[A-Za-z0-9-]+$"), timeout=30_000)
+    known_url = ledger.task(ledger.load(), task_id).get('web', {}).get('page_url')
+    if known_url and known_url != 'https://chatgpt.com/' and page.url != known_url:
+        raise TaskError('Conversation changed after Send; preserve original recovery URL')
+    record_web(ledger, task_id, page_url=page.url)
+    return collect(ledger, task_id, page, endpoint, timeout, progress=progress)
+
+
+def remember_failed_submission(ledger, task_id, page):
+    task = ledger.task(ledger.load(), task_id)
+    if task.get('web', {}).get('submission_intent'):
+        try:
+            current_url = checked_page(page.url)
+            known_url = task.get('web', {}).get('page_url')
+            if current_url != 'https://chatgpt.com/' and known_url in {None, 'https://chatgpt.com/'}:
+                record_web(ledger, task_id, page_url=current_url)
+        except (AttributeError, TaskError):
+            pass
+    fail_uncertain(ledger, task_id)
+
+
 def run(ledger, task_id, page, endpoint, timeout=180, progress=None, previous_task_id=None):
     try:
         prepare_submission(ledger, task_id, page, endpoint, previous_task_id)
-        if progress: progress('submitted')
-        # URL assignment can lag the send click. Wait once, without resubmission.
-        page.wait_for_url(re.compile(r"https://chatgpt\.com/c/[A-Za-z0-9-]+$"), timeout=30_000)
-        known_url = ledger.task(ledger.load(), task_id).get('web', {}).get('page_url')
-        if known_url and known_url != 'https://chatgpt.com/' and page.url != known_url:
-            raise TaskError('Conversation changed after Send; preserve original recovery URL')
-        record_web(ledger, task_id, page_url=page.url)
-        return collect(ledger, task_id, page, endpoint, timeout, progress=progress)
+        return finish_submission(ledger, task_id, page, endpoint, timeout, progress)
     except BaseException:
-        task = ledger.task(ledger.load(), task_id)
-        # A send may have succeeded just before wait_for_url timed out. Keep only
-        # the actual current conversation URL, never search other tabs for it.
-        if task.get("web", {}).get("submission_intent"):
-            try:
-                current_url = checked_page(page.url)
-                known_url = task.get('web', {}).get('page_url')
-                if current_url != "https://chatgpt.com/" and known_url in {None, 'https://chatgpt.com/'}:
-                    record_web(ledger, task_id, page_url=current_url)
-            except (AttributeError, TaskError):
-                pass
-        fail_uncertain(ledger, task_id)
+        remember_failed_submission(ledger, task_id, page)
+        raise
+
+
+def resume_draft(ledger, task_id, page, endpoint, timeout=180, progress=None):
+    """Only the exact failed, never-submitted edit draft, with retained references."""
+    guard(page)
+    task = ledger.task(ledger.load(), task_id)
+    web = task.get('web', {})
+    if (task['status'] != 'failed' or not task['needs_confirmation'] or task.get('operation') != 'edit'
+            or task['mode'] != 'web-ui' or not task.get('references')
+            or web.get('submission_intent') or task.get('submitted_at')
+            or any(e['event'] == 'submission_recorded' for e in task['events'])
+            or web.get('endpoint') != endpoint or web.get('page_url') != 'https://chatgpt.com/'
+            or page.url != 'https://chatgpt.com/'):
+        raise TaskError('Not a proven unsubmitted edit draft; use collect for a submitted request')
+    ledger.verify_inputs(task)
+    composer = unique_visible(page.locator(COMPOSER), 'Composer')
+    if not composer_matches(composer_text(composer), task['prompt_text']):
+        raise TaskError('Unsubmitted draft does not match the original prompt')
+    if (page.locator(USER).count() or page.locator(ASSISTANT).count()
+            or page.locator('main [data-talvt-turn-state]').count()
+            or unique_visible(page.locator(STOP), 'Generating', False)
+            or unique_visible(page.get_by_role('dialog'), 'Preview', False)):
+        raise TaskError('Page already has messages/generation/preview; no draft submission')
+    upload = web.get('reference_upload', {})
+    expected = [(Path(r['snapshot_path']).name, r['width'], r['height']) for r in task['references']]
+    if upload.get('snapshot_sha256') != [r['sha256'] for r in task['references']]:
+        raise TaskError('Missing approved upload record')
+    form = composer.locator('xpath=ancestor::form[1]')
+    if form.count() != 1:
+        raise TaskError('Cannot verify retained reference previews')
+    images = form.locator('img')
+    visible = [images.nth(i) for i in range(images.count()) if images.nth(i).is_visible()]
+    actual = [tuple(image.evaluate('el=>[el.alt,el.naturalWidth,el.naturalHeight]')) for image in visible]
+    if actual != expected or any(not image.evaluate('el=>el.complete') for image in visible):
+        raise TaskError('Retained references do not match the approved draft')
+    with ledger.lock():
+        state = ledger.load()
+        current = ledger.task(state, task_id)
+        if current != task or any(t['id'] != task_id and (t['status'] == 'running' or t['needs_confirmation']) for t in state['tasks']):
+            raise TaskError('Task state changed or another task needs review; stop')
+        if ledger.bounded(task['output_path'], 'outputs').exists():
+            raise TaskError('Existing output protected')
+        current.update(status='running', phase='awaiting_submission', needs_confirmation=False)
+        ledger.event(current, 'unsubmitted_draft_resumed_without_reupload')
+        ledger.save(state)
+    try:
+        send_prepared(ledger, task_id, page)
+        return finish_submission(ledger, task_id, page, endpoint, timeout, progress)
+    except BaseException:
+        remember_failed_submission(ledger, task_id, page)
         raise
 
 
@@ -481,7 +560,7 @@ def main(argv=None):
     parser.add_argument("--page", help="已打开并登录的唯一 ChatGPT 标签页 URL；generate 自动准备空白页")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("probe")
-    for name in ("run", "collect", "generate"):
+    for name in ("run", "collect", "generate", "edit", "resume-draft"):
         command = commands.add_parser(name)
         command.add_argument("id")
         command.add_argument("--confirmed", action="store_true", help="用户明确授权这一个任务及正常按钮下载")
@@ -508,12 +587,16 @@ def main(argv=None):
                                    file=sys.stderr, flush=True))
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
-        if args.command == 'generate':
+        if args.command in {'generate', 'edit'}:
             if args.page is not None:
-                raise TaskError('generate 自动准备空白页，不接受 --page；指定页面请使用 run')
+                raise TaskError('generate/edit 自动准备空白页，不接受 --page；指定页面请使用 run')
             task = ledger.task(ledger.load(), args.id)
             if task['status'] != 'pending' or task['mode'] != 'web-ui':
                 raise TaskError('generate 仅接受已明确授权的 pending 网页任务，不能重新发送已有任务')
+            if args.command == 'edit' and (task.get('operation') != 'edit' or not task.get('references')):
+                raise TaskError('edit requires an explicitly prepared edit task with reference images')
+            if args.command == 'generate' and task.get('operation') == 'edit':
+                raise TaskError('Use edit for a prepared edit task; do not silently change its intent')
             ledger.verify_inputs(task)
             if ledger.bounded(task['output_path'], 'outputs').exists():
                 raise TaskError('目标已存在，不会生成或覆盖')
@@ -529,7 +612,8 @@ def main(argv=None):
         with connection as page:
             endpoint = checked_endpoint(args.cdp)
             if args.command == "probe": result = probe(page)
-            elif args.command in {"run", "generate"}: result = run(ledger, args.id, page, endpoint, args.timeout, progress=progress)
+            elif args.command in {"run", "generate", "edit"}: result = run(ledger, args.id, page, endpoint, args.timeout, progress=progress)
+            elif args.command == 'resume-draft': result = resume_draft(ledger, args.id, page, endpoint, args.timeout, progress=progress)
             else:
                 try:
                     result = collect(ledger, args.id, page, endpoint, args.timeout, progress=progress)
