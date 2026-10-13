@@ -34,6 +34,8 @@ Separately, the user explicitly authorized a real serial trial after the origina
 
 ## Pending validation
 
+Later same-conversation work on `codex/same-chat-batch` is recorded in [SAME_CHAT_BATCH.md](SAME_CHAT_BATCH.md): 65 local full-suite tests passed in 46.390 s, then two additional legacy/recovery fixtures passed targeted runs. A separately user-authorized two-image cat sequence completed in one conversation in 88.469 s. The user subsequently approved submitting this feature as a PR; remote CI results must be observed on its exact revision, since earlier CI success does not validate it. Original validation above remains historical evidence for the publication-preparation scope.
+
 - Actual GitHub Actions jobs after an approved push; Windows/Linux/Python matrix is a proposed scope, not demonstrated remote compatibility.
 - Fresh-user/new-machine clone, browser policy/install variants, Codex discovery and Skill migration in a real new environment.
 - Dependency vulnerability/advisory review beyond a secret heuristic; runtime package ranges are not a reproducible security guarantee.

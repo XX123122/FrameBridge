@@ -1,6 +1,6 @@
 ---
 name: framebridge-web-imagegen
-description: Prepare and supervise one local ChatGPT web image task from txt/md prompts and explicitly selected references; save, validate, and recover FrameBridge tasks through a user-configured visible browser. Use for FrameBridge workflows, not paid API image generation.
+description: Prepare and supervise local ChatGPT web image tasks from txt/md prompts and named references, or an explicitly approved text-only sequence in one conversation; save, validate, and recover through a user-configured visible browser. Use for FrameBridge workflows, not paid API image generation.
 ---
 
 Project root: `PROJECT_ROOT_VALUE`. Installation substitutes the current checkout. An uninstalled source entry uses the checkout containing `scripts/framebridge.py`; do not guess another project. Read `README.md`, `docs/SETUP.md`, and `docs/RISKS.md` before first use.
@@ -19,6 +19,8 @@ Before submitting/uploading, establish current-user authorization for the specif
 2. Once browser access is configured and authorized, `web_chatgpt.py --cdp ENDPOINT --page https://chatgpt.com/ probe` inspects readiness without generation. Stop for manual login/verification. Image-mode labels were tested in the Chinese UI; report unsupported controls instead of guessing.
 3. An authorized pending task runs once with `web_chatgpt.py --cdp ENDPOINT generate ID --confirmed --timeout 300`. It prepares an empty image-mode tab in the selected existing session and uses normal controls. Do not pre-run ledger start, repeat submitted tasks, drain an unapproved queue, or silently change browsers/accounts/backends. If the current user explicitly approves a finite list of tasks and its image count, execute only those tasks serially; stop on the first failure/refusal/uncertainty and require their decision before continuing. Approval never permits automatic rewriting or retrying a refused prompt. `--confirmed` records human consent, not platform permission.
 4. Download only the unique new result from its original conversation via normal preview/download and download events. Never substitute image-URL fetches, CDP resources, network-response extraction, private model interfaces, or screenshots/crops. `check ID` must pass before completion. Link output and local timing report; distinguish observed generation, download/verification and total time including recovery. File validity does not prove visual identity/quality: flag uncertain content without generating again.
+
+For an explicitly requested same-conversation sequence, read `docs/SAME_CHAT_BATCH.md`. Freeze all prompts/output paths first and establish approval for the exact finite task list/image count. Use `web_chatgpt.py --cdp ENDPOINT batch ID1 ID2 --confirmed --timeout 300` once; it starts a fresh conversation and submits each task only after the preceding image is downloaded and verified. Initial scope is text-only; references are rejected before browser access. Later tasks inherit the conversation context. Do not rerun a stopped batch or silently skip/rewrite a task; only collect the submitted result on its original URL and ask for the user's decision on remaining tasks.
 
 ## Recovery and stopping
 
