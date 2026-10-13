@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a scoped improvement with truthful evidence.
+title: "[Feature] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and intended workflow
+      description: Describe the developer need without private prompts, accounts, credentials or conversation links.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and boundaries
+      description: Explain user consent, supported browser/UI and how the change can be tested offline. Do not request stealth, protection bypass or credential export.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or alternatives
+      description: Public references and reproducible nonsensitive examples; distinguish ideas from tested results.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request does not require violating the project's consent, privacy or no-bypass boundaries.
+          required: true

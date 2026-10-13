@@ -1,5 +1,7 @@
 # 参考项目审查
 
+> 这是固定第三方版本的历史静态审查，不是安全认证。结尾“尚未验证”描述当时阶段；后续有限实测见 [HISTORICAL_EXPERIMENTS.md](HISTORICAL_EXPERIMENTS.md)，当前就绪状态见 [RELEASE_READINESS.md](RELEASE_READINESS.md)。未运行这些项目。
+
 审查日期：2026-10-13。通过 GitHub API 获取提交树，再读取固定提交的原始源文件；只读审查，没有运行仓库脚本、安装这些仓库、启动服务或复制其实现。下面是范围有限的静态审查，不能作为全面安全认证。
 
 | 项目与固定提交 | Windows / 可见 Chrome | Prompt / 参考图 | 完成 / 保存 | 判断 |

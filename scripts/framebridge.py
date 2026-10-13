@@ -403,12 +403,13 @@ class Ledger:
 
 def doctor():
     import importlib.util
+    local_app_data = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local')))
     candidates = [Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Google/Chrome/Application/chrome.exe",
                   Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
-                  Path(os.environ.get("LOCALAPPDATA", "C:/Users/xx/AppData/Local")) / "Google/Chrome/Application/chrome.exe"]
+                  local_app_data / "Google/Chrome/Application/chrome.exe"]
     edge_candidates = [Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Microsoft/Edge/Application/msedge.exe",
                        Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Microsoft/Edge/Application/msedge.exe",
-                       Path(os.environ.get("LOCALAPPDATA", "C:/Users/xx/AppData/Local")) / "Microsoft/Edge/Application/msedge.exe"]
+                       local_app_data / "Microsoft/Edge/Application/msedge.exe"]
     return {"platform": platform.platform(), "python": platform.python_version(), "python_executable": sys.executable,
             "pillow": Image.__version__, "playwright_installed": importlib.util.find_spec("playwright") is not None,
             "chrome_standard_paths": [str(p) for p in candidates if p.is_file()],

@@ -1,0 +1,22 @@
+# FrameBridge
+
+> Unofficial local ChatGPT browser image workflow for Windows and Codex, using standard Playwright and a visible user-configured Edge session. Current-user configuration/login/task consent is required. Not an official API, hosted service, quota bypass or security certification.
+
+This is a navigation aid for documentation readers, not an indexing/ranking guarantee. Historical tests do not authorize new users. Automated output collection has service-terms risk. Live reference uploads and broader UI/platform support remain limited.
+
+## Start here
+- [English overview](README.md)
+- [中文说明](README.zh-CN.md)
+- [Setup and migration](docs/SETUP.md)
+- [Tasks and recovery](docs/USAGE.md)
+- [Public Skill](SKILL.md)
+
+## Evidence and boundaries
+- [Historical experiments](docs/HISTORICAL_EXPERIMENTS.md)
+- [Project audit](docs/PROJECT_AUDIT.md)
+- [Security policy](SECURITY.md)
+- [Risk notes](docs/RISKS.md)
+- [Release readiness](docs/RELEASE_READINESS.md)
+- [Draft release notes](docs/RELEASE_NOTES_v0.1.0.md)
+
+No official affiliation, release publication, CI passing state, adoption counts or guaranteed speed should be inferred from this file.
