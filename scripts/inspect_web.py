@@ -9,6 +9,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--cdp", required=True)
 parser.add_argument("--page", required=True)
 parser.add_argument("--result", action="store_true", help="检查当前对话结果的 UI 结构，不读取图片 URL")
+parser.add_argument('--include-conversation-text', action='store_true', help='Sensitive: explicitly include private conversation text; do not post it publicly')
+parser.add_argument('--screenshot', action='store_true', help='Sensitive: explicitly save a local screenshot, which may contain account/history information')
 args = parser.parse_args()
 with connected_page(args.cdp, args.page) as page:
     guard(page)
@@ -38,8 +40,11 @@ with connected_page(args.cdp, args.page) as page:
                           attribute_names:Array.from(n.attributes).map(a=>a.name)}))
         }))""")
         main = page.locator('main')
-        print(json.dumps({"images": images, "headings":main.get_by_role('heading').all_text_contents(),
-                          "current_conversation_text": main.inner_text()[:3000]},
-                         ensure_ascii=False, indent=2))
+        result = {'images': images, 'headings':main.get_by_role('heading').all_text_contents()}
+        if args.include_conversation_text:
+            result['current_conversation_text'] = main.inner_text()[:3000]
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.screenshot:
         screenshot = Path(__file__).resolve().parents[1] / 'logs/web-result-check.png'
+        screenshot.parent.mkdir(exist_ok=True)
         page.screenshot(path=str(screenshot))

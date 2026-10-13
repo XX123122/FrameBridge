@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible issue with sanitized diagnostics only.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "Never include cookies, tokens, passwords, private conversation URLs, full private prompts, raw logs or unredacted screenshots. Sensitive issues follow SECURITY.md."
+  - type: input
+    id: version
+    attributes:
+      label: FrameBridge commit/version
+      description: Use a public commit hash or version; do not include installed local account paths.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Python version
+      placeholder: Windows version, Python version
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser version and ChatGPT UI language
+      placeholder: Edge version; Chinese/English UI
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Failing stage
+      options: [Install, Browser setup, Probe, Submission, Observation, Download, Verification, Recovery, Offline tests, Documentation]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Minimal reproduction
+      description: Use a nonsensitive synthetic prompt and sanitized commands. Replace paths and private IDs; do not paste a real conversation.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and observed result
+      description: Include sanitized error type/text and whether a request may already have been sent; never resubmit to reproduce a quota/verification failure.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, private URLs/conversations, personal paths and unredacted logs/screenshots.
+          required: true

@@ -34,7 +34,7 @@ class BrowserFixtureTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.ledger = Ledger(self.temporary.name)
         self.ledger.init()
-        Path(self.temporary.name, "prompts/a.txt").write_text("a white cup, one image", encoding="utf-8")
+        Path(self.temporary.name, "prompts/a.txt").write_text("a cat, one image", encoding="utf-8")
         self.ledger.add("A", "prompts/a.txt", [], "outputs/A.png")
         self.context = self.browser.new_context(accept_downloads=True, service_workers="block")
         self.addCleanup(self.context.close)
@@ -102,7 +102,7 @@ class BrowserFixtureTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate("window.sendCount"), 0)
 
     def test_matching_staged_draft_uses_normal_send(self):
-        self.page.locator('#prompt-textarea').fill('a white cup, one image')
+        self.page.locator('#prompt-textarea').fill('a cat, one image')
         self.page.locator('[data-testid="send-button"]').evaluate("el => {el.removeAttribute('data-testid'); el.setAttribute('aria-label','发送')}")
         task = run(self.ledger, "A", self.page, "http://127.0.0.1:9222", timeout=10)
         self.assertEqual(task["status"], "completed")
@@ -244,6 +244,15 @@ class BrowserFixtureTests(unittest.TestCase):
         self.modern_result('streaming')
         task = self.ledger.task(self.ledger.load(), 'A')
         self.assertIsNone(new_result(self.page, task))
+        self.assertEqual(self.page.evaluate('window.sendCount'), 1)
+        self.assertFalse(Path(self.temporary.name, 'outputs/A.png').exists())
+
+    def test_completed_text_refusal_stops_without_resubmit(self):
+        self.modern_result()
+        self.page.locator('[data-talvt-turn-state]').evaluate("el => {el.replaceChildren(); el.textContent='抱歉，我不能生成这一角色的图片。'}")
+        task = self.ledger.task(self.ledger.load(), 'A')
+        with self.assertRaisesRegex(TaskError, 'platform_refusal'):
+            new_result(self.page, task)
         self.assertEqual(self.page.evaluate('window.sendCount'), 1)
         self.assertFalse(Path(self.temporary.name, 'outputs/A.png').exists())
 

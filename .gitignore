@@ -216,6 +216,28 @@ outputs/*
 references/*
 !references/.gitkeep
 
+# Personal prompt copies and browser/auth artifacts are not release contents.
+prompts/*
+!prompts/.gitkeep
+!prompts/example.md
+!prompts/prompt.txt
+!prompts/K01.md
+!prompts/K02.md
+!prompts/K03.md
+.env.*
+auth.json
+.codex/auth.json
+browser-profiles/
+edge-session/
+**/User Data/
+**/Cookies
+**/Cookies-journal
+**/Login Data
+**/Login Data-journal
+**/Local State
+**/framebridge-install.json
+**/SKILL.md.previous
+
 # Ruff stuff:
 .ruff_cache/
 

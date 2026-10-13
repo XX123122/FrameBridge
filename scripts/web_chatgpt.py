@@ -29,6 +29,7 @@ BLOCKED = re.compile(
     r"you.ve reached.*limit|image generation limit|can.t generate.*right now|"
     r"not allowed|access denied|验证您是人类|验证你是人类|请求过多|已达到.*上限|额度已用完|无权访问", re.I)
 DOWNLOAD_NAME = re.compile(r"^(Download( image)?|Save( image)?|下载(图片|图像)?|保存(图片|图像)?)$", re.I)
+REFUSAL = re.compile(r"(?:抱歉[^\n]*?(?:不能|无法)[^\n]*?(?:生成|创建)|(?:I (?:cannot|can't|can’t|am unable to)|unable to)\s+(?:generate|create))", re.I)
 POLL_SECONDS = 1
 PREVIEW_TIMEOUT_MS = 8_000
 
@@ -253,6 +254,9 @@ def new_result(page, task):
         if galleries.count() > 1:
             raise TaskError("返回多个图像画廊，等待人工选择")
         if galleries.count() == 0:
+            completed = main.locator('[data-talvt-turn-state="complete"]')
+            if completed.count() == 1 and REFUSAL.search(completed.nth(0).inner_text()):
+                raise TaskError('platform_refusal: completed text response, no image; do not rewrite/resubmit')
             return None
         gallery = galleries.nth(0)
         turn = gallery.locator('xpath=ancestor::*[@data-talvt-turn-state][1]')
