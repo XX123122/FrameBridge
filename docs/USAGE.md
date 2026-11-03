@@ -33,6 +33,8 @@ After explicitly authorizing recovery, replace the placeholder URL with the reco
 
 No normal command should guess another tab/conversation. `collect` has no Send step. It checks the endpoint, original conversation, prompt and unique result. Do not post that private URL in issues.
 
+If an earlier version timed out despite an already-visible image, see the [decorated-heading detection repair](RESULT_DETECTION_FIX.md). Check the local task first; a recovered completed task must not be submitted again. A detected tool-error/reference-request/refusal response records a diagnostic and stops without resubmission; it does not prove a specific backend failure.
+
 If a file was written before the last status update, authorize hash-based confirmation:
 
 ```powershell

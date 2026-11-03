@@ -152,6 +152,55 @@ class BrowserFixtureTests(unittest.TestCase):
         self.assertTrue(Path(self.temporary.name, 'logs/A/timing.md').exists())
         self.assertTrue(Path(self.temporary.name, 'logs/A/timing.json').exists())
 
+    def decorate_message_headings(self):
+        self.page.evaluate('''()=>{
+            document.querySelectorAll('main h2,main h4').forEach(h=>{
+                if(h.textContent==='你说：') {h.dataset.conversationRole='user';h.append('你');}
+                else if(h.textContent==='ChatGPT 说：') {h.dataset.conversationRole='assistant';h.append('ChatGPT');}
+            });
+        }''')
+
+    def test_decorated_role_headings_collect_existing_image_without_resubmit(self):
+        self.modern_result()
+        self.decorate_message_headings()
+        result=collect(self.ledger,'A',self.page,'http://127.0.0.1:9222',timeout=5)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(self.page.evaluate('window.sendCount'),1)
+        self.assertTrue(self.ledger.check('A')['valid_output'])
+
+    def test_decorated_headings_still_reject_extra_messages_and_prompt_mismatch(self):
+        self.modern_result()
+        self.decorate_message_headings()
+        task=self.ledger.task(self.ledger.load(),'A')
+        user=self.page.locator('main h2[data-conversation-role=user]')
+        user.evaluate("h=>h.nextElementSibling.textContent='another task'")
+        with self.assertRaisesRegex(TaskError,'Prompt'):
+            new_result(self.page,task)
+        user.evaluate("h=>h.after(h.cloneNode(true))")
+        with self.assertRaisesRegex(TaskError,'额外消息'):
+            new_result(self.page,task)
+        self.assertEqual(self.page.evaluate('window.sendCount'),1)
+
+    def test_unmarked_arbitrary_heading_suffix_is_not_treated_as_a_message(self):
+        self.modern_result()
+        self.page.locator('main h2').nth(0).evaluate("h=>h.textContent='你说：unrelated heading'")
+        self.assertIsNone(new_result(self.page,self.ledger.task(self.ledger.load(),'A')))
+
+    def test_decorated_headings_preserve_batch_history_and_latest_image_scope(self):
+        self.batch_fixture()
+        self.page.evaluate('''()=>{
+            const original=window.submitOnce;
+            window.submitOnce=()=>{original();document.querySelectorAll('main h4:not([data-conversation-role])').forEach(h=>{
+                const user=h.textContent==='你说：';h.dataset.conversationRole=user?'user':'assistant';h.append(user?'你':'ChatGPT');
+            });};
+        }''')
+        with patch('conversation_batch.connected_image_page',side_effect=self.batch_page):
+            result=run_batch(self.ledger,['A','B'],'http://127.0.0.1:9222',10,confirmed=True)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(self.page.evaluate('window.sendCount'),2)
+        a=self.ledger.task(self.ledger.load(),'A');b=self.ledger.task(self.ledger.load(),'B')
+        self.assertNotEqual(a['artifact']['sha256'],b['artifact']['sha256'])
+
     def test_async_preview_and_download_button_wait_without_resubmit(self):
         self.modern_result()
         self.page.evaluate("""() => {
@@ -202,10 +251,12 @@ class BrowserFixtureTests(unittest.TestCase):
 
     def test_image_mode_preparation_waits_default_text_without_submit(self):
         self.page.evaluate("""() => {
+            window.addMenuClicks=0;window.imageModeClicks=0;
             const add=document.createElement('button'); add.setAttribute('aria-label','添加文件等内容');
             add.onclick=()=>{
+                window.addMenuClicks++;
                 const entry=document.createElement('button'); entry.textContent='创建图像 可视化呈现任何内容';
-                entry.onclick=()=>setTimeout(()=>document.querySelector('#prompt-textarea').textContent='创建图像 ',200);
+                entry.onclick=()=>{window.imageModeClicks++;setTimeout(()=>document.querySelector('#prompt-textarea').textContent='创建图像 ',200);};
                 document.body.append(entry);
             };
             document.body.append(add);
@@ -213,6 +264,8 @@ class BrowserFixtureTests(unittest.TestCase):
         page = prepare_image_page(self.context)
         self.assertEqual(page.locator('#prompt-textarea').inner_text().strip(), '')
         self.assertEqual(page.evaluate('window.sendCount'), 0)
+        self.assertEqual(page.evaluate('window.addMenuClicks'), 1)
+        self.assertEqual(page.evaluate('window.imageModeClicks'), 1)
 
     def test_generate_rejects_completed_before_connecting_browser(self):
         task = run(self.ledger, 'A', self.page, 'http://127.0.0.1:9222', timeout=10)
@@ -420,6 +473,19 @@ class BrowserFixtureTests(unittest.TestCase):
             new_result(self.page, task)
         self.assertEqual(self.page.evaluate('window.sendCount'), 1)
         self.assertFalse(Path(self.temporary.name, 'outputs/A.png').exists())
+
+    def test_completed_tool_error_marks_failure_without_waiting_or_resending(self):
+        self.modern_result()
+        self.page.locator('[data-talvt-turn-state]').evaluate("el => {el.replaceChildren(); el.textContent='图像生成工具再次返回错误，未能生成画面。'}")
+        with self.assertRaisesRegex(TaskError,'image_service_error'):
+            collect(self.ledger,'A',self.page,'http://127.0.0.1:9222',timeout=10)
+        task=self.ledger.task(self.ledger.load(),'A')
+        self.assertEqual(task['status'],'failed')
+        self.assertEqual(task['phase'],'service_error')
+        self.assertEqual(task['web']['completed_text_failure'],'image_service_error')
+        self.assertTrue(task['needs_confirmation'])
+        self.assertEqual(self.page.evaluate('window.sendCount'),1)
+        self.assertFalse(Path(self.temporary.name,'outputs/A.png').exists())
 
     def test_current_gallery_multiple_images_stop(self):
         self.modern_result()

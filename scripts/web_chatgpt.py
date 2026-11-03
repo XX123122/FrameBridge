@@ -30,8 +30,48 @@ BLOCKED = re.compile(
     r"not allowed|access denied|验证您是人类|验证你是人类|请求过多|已达到.*上限|额度已用完|无权访问", re.I)
 DOWNLOAD_NAME = re.compile(r"^(Download( image)?|Save( image)?|下载(图片|图像)?|保存(图片|图像)?)$", re.I)
 REFUSAL = re.compile(r"(?:抱歉[^\n]*?(?:不能|无法)[^\n]*?(?:生成|创建)|(?:I (?:cannot|can't|can’t|am unable to)|unable to)\s+(?:generate|create))", re.I)
+IMAGE_SERVICE_ERROR = re.compile(
+    r"(?:图像|图片|绘图|生图)(?:生成)?工具[^\n]{0,50}(?:返回错误|出错|发生错误|未能|无法)|"
+    r"(?:image (?:generation )?tool|image generation (?:service|tool))[^\n]{0,70}(?:returned an? error|failed|error)|"
+    r"(?:couldn.t|could not) generate[^\n]{0,90}(?:tool|service)[^\n]{0,40}error", re.I)
+REFERENCE_REQUIRED = re.compile(
+    r"请[^\n]{0,20}上传[^\n]{0,45}(?:参考|原始|原图)[^\n]{0,20}(?:图|画面)|"
+    r"please upload[^\n]{0,70}(?:reference|original|source) (?:image|picture|frame)", re.I)
 POLL_SECONDS = 1
 PREVIEW_TIMEOUT_MS = 8_000
+
+
+def message_headings(scope, role):
+    """Semantic role markers survive decorative text appended to headings.
+
+    Keep the exact legacy labels as a fallback; never accept arbitrary headings
+    just because their text starts with a message label.
+    """
+    labels = {'user': r'^(你说：|You said:)$',
+              'assistant': r'^(ChatGPT 说：|ChatGPT said:)$'}
+    if role not in labels:
+        raise ValueError('Unsupported message role')
+    headings = scope.get_by_role('heading', include_hidden=True)
+    marked = headings.and_(scope.locator(f'[data-conversation-role="{role}"]'))
+    fallback = scope.get_by_role('heading', name=re.compile(labels[role]), include_hidden=True)
+    return marked.or_(fallback)
+
+
+def completed_text_failure(text):
+    """Visible assistant prose is evidence, never a server error-code diagnosis."""
+    # Modern paired turns can contain the user's text before the assistant.
+    # Do not classify error phrases quoted only in a user prompt.
+    text = re.split(r'(?:ChatGPT 说：|ChatGPT said:)', text)[-1]
+    if IMAGE_SERVICE_ERROR.search(text): return 'image_service_error'
+    if REFERENCE_REQUIRED.search(text): return 'reference_requested'
+    if REFUSAL.search(text): return 'platform_refusal'
+    return None
+
+
+def reject_completed_text(text):
+    reason = completed_text_failure(text)
+    if reason:
+        raise TaskError(reason+': completed text response, no image; preserve task, do not resubmit')
 
 
 def composer_matches(actual, prompt):
@@ -153,8 +193,8 @@ def prepare_image_page(context):
     guard(page)
     page.locator(COMPOSER).wait_for(state='visible', timeout=15_000)
     composer = unique_visible(page.locator(COMPOSER), '输入框')
-    headings = page.locator('main').get_by_role('heading',
-        name=re.compile(r'^(你说：|You said:|ChatGPT 说：|ChatGPT said:)$'), include_hidden=True)
+    main = page.locator('main')
+    headings = message_headings(main, 'user').or_(message_headings(main, 'assistant'))
     if composer.inner_text().strip() or page.locator(USER).count() or page.locator(ASSISTANT).count() or headings.count():
         raise TaskError('页面已有草稿或消息，保持原内容并停止')
     wait_ready(page, page.get_by_role('button', name='添加文件等内容', exact=True), '添加菜单').click()
@@ -210,8 +250,8 @@ def prepare_submission(ledger, task_id, page, endpoint, previous_task_id=None):
         raise TaskError("输入框已有不同内容；不会替换用户草稿")
     if unique_visible(page.locator(STOP), "生成中", False):
         raise TaskError("当前页面正在生成，停止")
-    current_headings = page.locator('main').get_by_role(
-        'heading', name=re.compile(r'^(你说：|You said:|ChatGPT 说：|ChatGPT said:)$'), include_hidden=True)
+    main = page.locator('main')
+    current_headings = message_headings(main, 'user').or_(message_headings(main, 'assistant'))
     continuation = {}
     if previous_task_id is not None:
         from conversation_batch import continuation_baseline
@@ -290,15 +330,15 @@ def new_result(page, task):
             raise TaskError("返回多个图像画廊，等待人工选择")
         if galleries.count() == 0:
             completed = main.locator('[data-talvt-turn-state="complete"]')
-            if completed.count() == 1 and REFUSAL.search(completed.nth(0).inner_text()):
-                raise TaskError('platform_refusal: completed text response, no image; do not rewrite/resubmit')
+            if completed.count() == 1:
+                reject_completed_text(completed.nth(0).inner_text())
             return None
         gallery = galleries.nth(0)
         turn = gallery.locator('xpath=ancestor::*[@data-talvt-turn-state][1]')
         if turn.count() != 1 or turn.get_attribute('data-talvt-turn-state') != 'complete':
             return None
-        user_headings = main.get_by_role('heading', name=re.compile(r'^(你说：|You said:)$'), include_hidden=True)
-        assistant_headings = main.get_by_role('heading', name=re.compile(r'^(ChatGPT 说：|ChatGPT said:)$'), include_hidden=True)
+        user_headings = message_headings(main, 'user')
+        assistant_headings = message_headings(main, 'assistant')
         if user_headings.count() > 1 or assistant_headings.count() > 1:
             raise TaskError("对话包含额外消息，无法确定输出归属")
         if user_headings.count() != 1 or assistant_headings.count() != 1:
@@ -341,6 +381,8 @@ def new_result(page, task):
             generated.append(item)
     if len(generated) > 1:
         raise TaskError("返回多张图片，只授权一张，停止并等待人工选择")
+    if not generated:
+        reject_completed_text(result.inner_text())
     return (result, generated[0]) if generated else None
 
 
@@ -414,7 +456,14 @@ def collect(ledger, task_id, page, endpoint, timeout=180, progress=None):
             raise TaskError("本地任务已被人工停止，结束观察和下载")
         if task["status"] == "failed" and not current["needs_confirmation"]:
             raise TaskError("待确认任务已被人工关闭，结束观察和下载")
-        ready = new_result(page, task)
+        try:
+            ready = new_result(page, task)
+        except TaskError as error:
+            code=str(error).split(':',1)[0]
+            if code in {'image_service_error','reference_requested','platform_refusal'}:
+                record_web(ledger,task_id,completed_text_failure=code,no_image_observed=True)
+                if current['status']=='running':ledger.stop(task_id,'service_error')
+            raise
         if progress and time.monotonic() >= next_progress:
             start_at = web.get('send_click_started_at', task.get('submitted_at'))
             elapsed = (datetime.fromisoformat(now()) - datetime.fromisoformat(start_at)).total_seconds()
