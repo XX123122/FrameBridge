@@ -9,11 +9,9 @@ import time
 import uuid
 
 from framebridge import TaskError, atomic_json, now
-from web_chatgpt import (ASSISTANT, USER, STOP, REFUSAL, connected_image_page,
-                        guard, unique_visible, wait_ready, record_web, run)
+from web_chatgpt import (ASSISTANT, USER, STOP, connected_image_page,
+                        guard, unique_visible, wait_ready, record_web, run, reject_completed_text, message_headings)
 
-USER_HEADING = re.compile(r'^(你说：|You said:)$')
-ASSISTANT_HEADING = re.compile(r'^(ChatGPT 说：|ChatGPT said:)$')
 CLOSE = re.compile(r'^(关闭查看器|关闭|Close(?: viewer)?)$', re.I)
 
 
@@ -39,8 +37,8 @@ def history(page, limit=None):
     for i in range(count):
         turn = turns.nth(i)
         if (turn.get_attribute('data-talvt-turn-state') != 'complete'
-                or turn.get_by_role('heading', name=USER_HEADING, include_hidden=True).count() != 1
-                or turn.get_by_role('heading', name=ASSISTANT_HEADING, include_hidden=True).count() != 1):
+                or message_headings(turn, 'user').count() != 1
+                or message_headings(turn, 'assistant').count() != 1):
             raise TaskError('Unsupported or incomplete paired conversation turn; stop')
         prefix.append(text_digest(turn))
     return {'style': 'modern', 'turns': turns.count(), 'prefix': prefix}
@@ -94,8 +92,8 @@ def batch_result(page, task):
         result = turns.nth(count)
         if result.get_attribute('data-talvt-turn-state') != 'complete':
             return None
-        if (result.get_by_role('heading', name=USER_HEADING, include_hidden=True).count() != 1
-                or result.get_by_role('heading', name=ASSISTANT_HEADING, include_hidden=True).count() != 1):
+        if (message_headings(result, 'user').count() != 1
+                or message_headings(result, 'assistant').count() != 1):
             return None
         user = result
         galleries = result.get_by_test_id('generated-image-gallery')
@@ -106,8 +104,7 @@ def batch_result(page, task):
         raise TaskError('New user turn does not match the frozen prompt')
     if galleries is not None:
         if galleries.count() == 0:
-            if REFUSAL.search(result.inner_text()):
-                raise TaskError('platform_refusal: stop batch without rewriting/resubmitting')
+            reject_completed_text(result.inner_text())
             return None
         previews = galleries.get_by_test_id('generated-image-preview')
         if previews.count() > 1:
@@ -115,8 +112,8 @@ def batch_result(page, task):
         images = previews.locator('img')
     else:
         images = result.locator('img, canvas')
-        if images.count() == 0 and REFUSAL.search(result.inner_text()):
-            raise TaskError('platform_refusal: stop batch without rewriting/resubmitting')
+        if images.count() == 0:
+            reject_completed_text(result.inner_text())
     generated = []
     for i in range(images.count()):
         item = images.nth(i)

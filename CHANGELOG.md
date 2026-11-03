@@ -21,5 +21,6 @@ No v0.1.0 tag or Release has been published by this preparation task.
 - Cat prompts for future tests; original K01/K02/K03 experiment samples/snapshots retained.
 - Explicit text-only same-conversation `batch`: frozen history boundaries, serial generation/download, stop on first failure, normal viewer closing, and per-image/whole-list timing.
 - Explicit reference-guided `edit` intent/command, immutable reference snapshots, normal file chooser for multiple hidden inputs, upload-readiness/error guards and separate upload timing evidence.
+- Repair completed-image detection for decorated message headings using semantic role markers across single-image and same-chat paths; preserve strict attribution and collect-only recovery. See [2026-11-03 evidence](docs/RESULT_DETECTION_FIX.md).
 
 Remote CI, new-machine compatibility, reviewed public demo and final release approval remain outstanding; local evidence is recorded in [release readiness](docs/RELEASE_READINESS.md).
