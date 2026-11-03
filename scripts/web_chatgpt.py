@@ -15,6 +15,7 @@ import re
 import sys
 import tempfile
 import time
+import weakref
 from urllib.parse import urlparse
 
 from framebridge import Ledger, TaskError, inspect_image, read_limited, now
@@ -22,6 +23,7 @@ from framebridge import Ledger, TaskError, inspect_image, read_limited, now
 ASSISTANT = '[data-message-author-role="assistant"]'
 USER = '[data-message-author-role="user"]'
 COMPOSER = '#prompt-textarea, [role="textbox"][contenteditable="true"]'
+IMAGE_HINT = '[data-inline-selection-pill][data-system-hint-type="picture_v2"][contenteditable="false"]'
 SEND = 'button[data-testid="send-button"], button[data-testid="composer-submit-button"], button[aria-label="发送"]'
 STOP = 'button[data-testid="stop-button"]'
 BLOCKED = re.compile(
@@ -39,6 +41,9 @@ REFERENCE_REQUIRED = re.compile(
     r"please upload[^\n]{0,70}(?:reference|original|source) (?:image|picture|frame)", re.I)
 POLL_SECONDS = 1
 PREVIEW_TIMEOUT_MS = 8_000
+# Ephemeral proof of this process's own normal image-mode selection. Never
+# infer ownership of an arbitrary existing draft from its text alone.
+_IMAGE_MODE_PREPARATIONS = weakref.WeakKeyDictionary()
 
 
 def message_headings(scope, role):
@@ -87,10 +92,30 @@ def composer_text(composer):
         const nodes=Array.from(el.childNodes);
         if(!nodes.length || !nodes.every(n=>n.nodeType===1 && n.tagName==='P')) return el.innerText;
         const read=n=>n.nodeType===3?n.textContent:n.nodeType!==1?'':
+            n.matches('[data-inline-selection-pill][data-system-hint-type="picture_v2"][contenteditable="false"]')?'':
+            n.tagName==='P' && n.childNodes.length===1 && n.firstChild.nodeName==='BR'?'':
             n.tagName==='BR'?(n.classList.contains('ProseMirror-trailingBreak')?'':'\\n'):
             Array.from(n.childNodes).map(read).join('');
         return nodes.map(read).join('\\n');
     }''')
+
+
+def fill_composer(composer, prompt):
+    hint = composer.locator(IMAGE_HINT)
+    if hint.count() == 0:
+        composer.fill(prompt)
+        return
+    if hint.count() != 1:
+        raise TaskError('Image-mode hint is ambiguous; preserve draft')
+    # Select only after the native noneditable image-mode pill, then type via
+    # the editor's normal input path. Do not delete/reselect the active tool.
+    composer.focus()
+    composer.evaluate('''el=>{
+        const hint=el.querySelector('[data-inline-selection-pill][data-system-hint-type="picture_v2"][contenteditable="false"]');
+        const range=document.createRange();range.selectNodeContents(el);range.setStartAfter(hint);
+        const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+    }''')
+    composer.page.keyboard.insert_text(prompt)
 
 
 def checked_endpoint(value):
@@ -148,7 +173,7 @@ def probe(page):
     guard(page)
     composer = unique_visible(page.locator(COMPOSER), "输入框")
     return {"composer": True, "composer_editable": composer.is_editable(),
-            "image_entry_visible": bool(unique_visible(page.get_by_role("button", name=re.compile(r"^(Create image|Images|创建图片|创建图像|生成图片|图像)(?:\s|$)", re.I)), "图片入口", False)),
+            "image_entry_visible": bool(composer.locator(IMAGE_HINT).count() == 1 or unique_visible(page.get_by_role("button", name=re.compile(r"^(Create image|Images|创建图片|创建图像|生成图片|图像)(?:\s|$)", re.I)), "图片入口", False)),
             "file_inputs": page.locator('input[type="file"]').count(),
             "download_strategy": "normal_page_button_only", "request_submitted": False}
 
@@ -179,13 +204,34 @@ def connected_page(endpoint, page_url):
         yield page
 
 
+def page_has_draft_or_messages(page, composer):
+    main = page.locator('main')
+    inputs = page.locator('input[type="file"]')
+    attachments = any(inputs.nth(i).evaluate('el => (el.files || []).length > 0') for i in range(inputs.count()))
+    form = composer.locator('xpath=ancestor::form[1]')
+    if form.count() == 1:
+        images = form.locator('img')
+        attachments = attachments or any(images.nth(i).is_visible() for i in range(images.count()))
+    return bool(composer_text(composer).strip() or attachments or page.locator(USER).count()
+                or page.locator(ASSISTANT).count() or main.locator('[data-talvt-turn-state]').count()
+                or message_headings(main, 'user').count() or message_headings(main, 'assistant').count()
+                or unique_visible(page.get_by_role('dialog'), '已有弹窗', False)
+                or unique_visible(page.locator(STOP), '生成中', False))
+
+
 def prepare_image_page(context):
     roots = [page for page in context.pages if page.url == 'https://chatgpt.com/']
-    if len(roots) > 1:
-        raise TaskError('存在多个首页标签页，请人工确定目标')
-    if roots:
+    # Reuse only one demonstrably empty root. Leave occupied/ambiguous roots
+    # untouched; an explicitly requested fresh generation can open its own tab.
+    page = None
+    if len(roots) == 1:
         page = roots[0]
-    else:
+        guard(page)
+        page.locator(COMPOSER).wait_for(state='visible', timeout=15_000)
+        composer = unique_visible(page.locator(COMPOSER), '输入框')
+        if page_has_draft_or_messages(page, composer):
+            page = None
+    if page is None:
         page = context.new_page()
         page.goto('https://chatgpt.com/', wait_until='domcontentloaded', timeout=20_000)
     page.set_default_timeout(5_000)
@@ -193,10 +239,10 @@ def prepare_image_page(context):
     guard(page)
     page.locator(COMPOSER).wait_for(state='visible', timeout=15_000)
     composer = unique_visible(page.locator(COMPOSER), '输入框')
-    main = page.locator('main')
-    headings = message_headings(main, 'user').or_(message_headings(main, 'assistant'))
-    if composer.inner_text().strip() or page.locator(USER).count() or page.locator(ASSISTANT).count() or headings.count():
+    if page_has_draft_or_messages(page, composer):
         raise TaskError('页面已有草稿或消息，保持原内容并停止')
+    if composer.locator(IMAGE_HINT).count() == 1:
+        return page
     wait_ready(page, page.get_by_role('button', name='添加文件等内容', exact=True), '添加菜单').click()
     wait_ready(page, page.get_by_role('button', name=re.compile(r'^创建图像(?:\s|$)')), '创建图像').click()
     # Wait for the default text generated by the image-mode selection itself.
@@ -204,8 +250,12 @@ def prepare_image_page(context):
     while True:
         guard(page)
         composer = unique_visible(page.locator(COMPOSER), '图片输入框')
+        if composer.locator(IMAGE_HINT).count() == 1 and not composer_text(composer).strip():
+            return page
         text = composer.inner_text().strip()
         if text == '创建图像':
+            _IMAGE_MODE_PREPARATIONS[page] = {'url': page.url, 'default': '创建图像',
+                                               'prepared_at': time.monotonic()}
             composer.fill('')
             break
         if text:
@@ -246,7 +296,11 @@ def prepare_submission(ledger, task_id, page, endpoint, previous_task_id=None):
     probe(page)
     composer = unique_visible(page.locator(COMPOSER), "输入框")
     existing = composer_text(composer)
-    if existing.strip() and not composer_matches(existing, task["prompt_text"]):
+    preparation = _IMAGE_MODE_PREPARATIONS.pop(page, None)
+    own_default = bool(preparation and preparation['url'] == page.url == 'https://chatgpt.com/'
+                       and time.monotonic() - preparation['prepared_at'] <= 60
+                       and existing.strip() == preparation['default'])
+    if existing.strip() and not composer_matches(existing, task["prompt_text"]) and not own_default:
         raise TaskError("输入框已有不同内容；不会替换用户草稿")
     if unique_visible(page.locator(STOP), "生成中", False):
         raise TaskError("当前页面正在生成，停止")
@@ -270,7 +324,7 @@ def prepare_submission(ledger, task_id, page, endpoint, previous_task_id=None):
         record_web(ledger, task_id, reference_upload_started_at=now())
         upload = upload_references(ledger, task, page)
         record_web(ledger, task_id, reference_upload=upload)
-    composer.fill(task["prompt_text"])
+    fill_composer(composer, task["prompt_text"])
     if not composer_matches(composer_text(composer), task["prompt_text"]):
         raise TaskError("网页输入内容与原始 Prompt 不一致，停止")
     send_prepared(ledger, task_id, page)

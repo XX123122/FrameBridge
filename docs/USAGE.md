@@ -14,6 +14,8 @@ Use the project root and venv created in [Quick start](../README.md#quick-start)
 
 `pending/running/completed/failed` are primary states. `needs_confirmation` marks uncertain results. At most one task runs; uncertainty blocks starting the next. There is no unattended queue drain or infinite retry. Completed means the file was collected/validated, not a guarantee of visual identity or artistic quality.
 
+Automatic `generate`/`edit` preparation preserves native image-tool hints and avoids occupied home drafts by opening a separate tab when necessary. It never clears arbitrary user text just because it says Create image. If a second task stopped before Send on a tool hint, check that it is still pending/zero-submission and use the updated source; see [image-mode preparation repair](IMAGE_MODE_PREFILL_FIX.md). Explicit `run` on a chosen page still rejects a different draft.
+
 ## Interrupt and inspect
 
 ```powershell
