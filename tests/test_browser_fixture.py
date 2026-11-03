@@ -16,7 +16,7 @@ from contextlib import contextmanager
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from PIL import Image
 from framebridge import Ledger, TaskError
-from web_chatgpt import run, probe, collect, new_result, prepare_submission, record_web, normal_download, prepare_image_page, main, composer_text, composer_matches, resume_draft
+from web_chatgpt import run, probe, collect, new_result, prepare_submission, record_web, normal_download, prepare_image_page, main, composer_text, composer_matches, resume_draft, IMAGE_HINT
 from conversation_batch import run_batch, close_preview, history
 
 
@@ -266,6 +266,116 @@ class BrowserFixtureTests(unittest.TestCase):
         self.assertEqual(page.evaluate('window.sendCount'), 0)
         self.assertEqual(page.evaluate('window.addMenuClicks'), 1)
         self.assertEqual(page.evaluate('window.imageModeClicks'), 1)
+
+    def enable_image_mode_fixture(self):
+        self.page.evaluate('''()=>{
+            window.addMenuClicks=0;window.imageModeClicks=0;
+            const add=document.createElement('button');add.setAttribute('aria-label','添加文件等内容');
+            add.onclick=()=>{window.addMenuClicks++;const mode=document.createElement('button');mode.textContent='创建图像';
+                mode.onclick=()=>{window.imageModeClicks++;document.querySelector('#prompt-textarea').textContent='创建图像 ';};
+                document.body.append(mode);};document.body.append(add);
+        }''')
+
+    def test_own_image_prefill_reappears_after_preparation_sends_original_once(self):
+        self.enable_image_mode_fixture()
+        page=prepare_image_page(self.context)
+        page.locator('#prompt-textarea').fill('创建图像 ')
+        result=run(self.ledger,'A',page,'http://127.0.0.1:9222',10)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(page.locator('[data-message-author-role=user]').inner_text(),'a cat, one image')
+        self.assertEqual(page.evaluate('window.imageModeClicks'),1)
+        self.assertEqual(page.evaluate('window.sendCount'),1)
+
+    def insert_native_image_hint(self):
+        self.page.locator('#prompt-textarea').evaluate('''el=>{
+            el.innerHTML='<p><span data-inline-selection-pill data-system-hint-type="picture_v2" contenteditable="false">创建图像</span> </p>';
+        }''')
+
+    def test_native_image_hint_is_not_user_text_and_is_preserved_during_multiline_send(self):
+        self.insert_native_image_hint()
+        self.assertEqual(composer_text(self.page.locator('#prompt-textarea')).strip(),'')
+        self.assertTrue(probe(self.page)['image_entry_visible'])
+        prompt='a cat by the window\n\nkeep the blue cushion\n'
+        Path(self.temporary.name,'prompts/b.txt').write_text(prompt,encoding='utf-8')
+        self.ledger.add('B','prompts/b.txt',[],'outputs/B.png')
+        page=prepare_image_page(self.context) # No menu controls exist: active hint must be reused.
+        self.assertIs(page,self.page)
+        result=run(self.ledger,'B',page,'http://127.0.0.1:9222',10)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(self.page.evaluate('window.sendCount'),1)
+        self.assertIn('keep the blue cushion',self.page.locator('[data-message-author-role=user]').inner_text())
+
+    def test_native_image_hint_fill_keeps_tool_node_and_exact_user_prompt(self):
+        from web_chatgpt import fill_composer
+        self.insert_native_image_hint()
+        c=self.page.locator('#prompt-textarea')
+        original=c.locator(IMAGE_HINT).inner_html()
+        prompt='same cat\n\nonly change the cushion\n'
+        fill_composer(c,prompt)
+        self.assertEqual(c.locator(IMAGE_HINT).count(),1)
+        self.assertEqual(c.locator(IMAGE_HINT).inner_html(),original)
+        self.assertTrue(composer_matches(composer_text(c),prompt),repr((composer_text(c),prompt,c.inner_html())))
+        self.assertEqual(self.page.evaluate('window.sendCount'),0)
+
+    def test_native_hint_with_real_user_draft_opens_new_tab_without_touching_original(self):
+        self.insert_native_image_hint()
+        self.page.locator('#prompt-textarea').evaluate("el=>el.querySelector('p').append('keep this real draft')")
+        original=self.page.locator('#prompt-textarea').inner_html()
+        with patch('web_chatgpt.wait_ready',side_effect=TaskError('fixture stop')):
+            with self.assertRaises(TaskError):prepare_image_page(self.context)
+        self.assertEqual(len(self.context.pages),2)
+        self.assertEqual(self.page.locator('#prompt-textarea').inner_html(),original)
+
+    def test_user_draft_after_preparation_is_not_treated_as_tool_prefill(self):
+        self.enable_image_mode_fixture()
+        page=prepare_image_page(self.context)
+        page.locator('#prompt-textarea').fill('keep my private draft')
+        with self.assertRaisesRegex(TaskError,'已有不同内容'):
+            run(self.ledger,'A',page,'http://127.0.0.1:9222',10)
+        self.assertEqual(page.locator('#prompt-textarea').inner_text(),'keep my private draft')
+        self.assertEqual(page.evaluate('window.sendCount'),0)
+        self.assertEqual(self.ledger.task(self.ledger.load(),'A')['status'],'pending')
+
+    def test_identical_tool_words_without_preparation_proof_are_preserved(self):
+        self.page.locator('#prompt-textarea').fill('创建图像 ')
+        original=self.page.locator('#prompt-textarea').inner_html()
+        with self.assertRaisesRegex(TaskError,'已有不同内容'):
+            run(self.ledger,'A',self.page,'http://127.0.0.1:9222',10)
+        self.assertEqual(self.page.locator('#prompt-textarea').inner_html(),original)
+        self.assertEqual(self.page.evaluate('window.sendCount'),0)
+
+    def test_occupied_home_opens_separate_prepared_tab_preserving_draft(self):
+        self.page.locator('#prompt-textarea').fill('preserve original home draft')
+        with patch('web_chatgpt.wait_ready', side_effect=TaskError('fixture stops before image mode')):
+            with self.assertRaisesRegex(TaskError,'fixture stops'):
+                prepare_image_page(self.context)
+        self.assertEqual(len(self.context.pages),2)
+        self.assertEqual(self.page.locator('#prompt-textarea').inner_text(),'preserve original home draft')
+        new_page=self.context.pages[1]
+        self.assertEqual(new_page.locator('#prompt-textarea').inner_text(),'')
+        self.assertEqual(self.page.evaluate('window.sendCount'),0)
+        self.assertEqual(new_page.evaluate('window.sendCount'),0)
+
+    def test_existing_attachment_home_is_not_reused(self):
+        path=Path(self.temporary.name,'reference.png')
+        stream=io.BytesIO();Image.new('RGB',(512,288),'blue').save(stream,format='PNG');path.write_bytes(stream.getvalue())
+        self.page.locator('input[type=file]').set_input_files(str(path))
+        with patch('web_chatgpt.wait_ready',side_effect=TaskError('fixture stop')):
+            with self.assertRaises(TaskError):prepare_image_page(self.context)
+        self.assertEqual(len(self.context.pages),2)
+        self.assertEqual(self.page.locator('input[type=file]').evaluate('el=>el.files.length'),1)
+        self.assertEqual(self.page.evaluate('window.sendCount'),0)
+
+    def test_new_tab_restoring_existing_draft_stops_without_replacing_either(self):
+        self.page.locator('#prompt-textarea').fill('keep old tab')
+        # Simulate a site restoring draft state on every new home navigation.
+        self.html=self.html.replace('<div contenteditable="true" id="prompt-textarea"></div>',
+                                    '<div contenteditable="true" id="prompt-textarea">restored draft</div>')
+        with self.assertRaisesRegex(TaskError,'页面已有草稿'):
+            prepare_image_page(self.context)
+        self.assertEqual(self.page.locator('#prompt-textarea').inner_text(),'keep old tab')
+        self.assertEqual(self.context.pages[1].locator('#prompt-textarea').inner_text(),'restored draft')
+        self.assertEqual(self.context.pages[1].evaluate('window.sendCount'),0)
 
     def test_generate_rejects_completed_before_connecting_browser(self):
         task = run(self.ledger, 'A', self.page, 'http://127.0.0.1:9222', timeout=10)
